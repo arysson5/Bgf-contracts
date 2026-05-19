@@ -1,0 +1,34 @@
+# Interface
+streamlit[pdf]>=1.35.0
+streamlit-extras>=0.4.0
+
+# Leitura de documentos
+mammoth>=1.8.0
+python-docx>=1.1.0
+pdfplumber>=0.11.0
+pymupdf>=1.24.0
+unstructured[docx,pdf]>=0.14.0
+
+# AI e LLM (Google Gemini)
+langchain>=0.2.0
+langchain-google-genai>=2.0.0
+langchain-core>=0.2.0
+langchain-text-splitters>=0.2.0
+
+# Diff engine
+diff-match-patch>=20230430
+
+# Banco de dados
+sqlmodel>=0.0.19
+sqlalchemy>=2.0.0
+
+# Validação e schemas
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+
+# Utilitários
+python-dotenv>=1.0.0
+rapidfuzz>=3.9.0
+tiktoken>=0.7.0
+loguru>=0.7.0
+tenacity>=8.3.0
