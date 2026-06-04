@@ -15,11 +15,17 @@ from app.models.schemas import (
     ContractDiffResult,
     ContractualChange,
 )
+from app.core.context_limits import (
+    CHUNK_OVERLAP_CHARS,
+    CHUNK_SIZE_CHARS,
+    MAX_EXCERPT_CHARS,
+)
 from app.utils.helpers import chunk_text, count_tokens, safe_json_parse
+from app.utils.settings import get_settings
 
-# Limite de saída maior para listas longas de alterações
-ANALYSIS_MAX_TOKENS = 8192
-MAX_EXCERPT_CHARS = 400
+
+def _analysis_max_tokens() -> int:
+    return max(4096, get_settings().max_tokens)
 
 
 class ContractualChangeLLM(BaseModel):
@@ -234,7 +240,7 @@ def _content_from_raw_message(raw) -> str:
 
 
 def _analyze_pair(text_a: str, text_b: str, label_a: str, label_b: str) -> _ChangesPayload:
-    llm = get_llm(temperature=0, max_output_tokens=ANALYSIS_MAX_TOKENS)
+    llm = get_llm(temperature=0, max_output_tokens=_analysis_max_tokens())
     structured = llm.with_structured_output(_ChangesPayloadLLM, include_raw=True)
     prompt = ChatPromptTemplate.from_messages(
         [("system", SYSTEM_PROMPT), ("user", USER_PROMPT)]
@@ -317,8 +323,8 @@ def compare_contracts(
     if max_tokens <= 12000:
         payload = _analyze_pair(text_a, text_b, label_a, label_b)
     else:
-        chunks_a = chunk_text(text_a, chunk_size=5000, overlap=300)
-        chunks_b = chunk_text(text_b, chunk_size=5000, overlap=300)
+        chunks_a = chunk_text(text_a, chunk_size=CHUNK_SIZE_CHARS, overlap=CHUNK_OVERLAP_CHARS)
+        chunks_b = chunk_text(text_b, chunk_size=CHUNK_SIZE_CHARS, overlap=CHUNK_OVERLAP_CHARS)
         partials: list[_ChangesPayload] = []
         pairs = max(len(chunks_a), len(chunks_b))
         for i in range(pairs):

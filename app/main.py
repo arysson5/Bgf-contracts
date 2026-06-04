@@ -2,6 +2,10 @@
 
 import streamlit as st
 
+from app.utils.dev_reload import sync_app_modules
+
+sync_app_modules(st.session_state)
+
 from app.utils.data_cache import (
     cached_analyses_today_count,
     cached_contracts,
@@ -36,28 +40,29 @@ stat_cards([
     ("Versões", total_versions),
 ])
 
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3 = st.columns(3)
 with c1:
-    if st.button("Novo contrato", type="primary", use_container_width=True):
-        st.session_state.active_contract_id = None
+    if st.button("Nova análise inicial", type="primary", width="stretch"):
+        from app.utils.active_contract import apply_active_contract, clear_active_contract_context
+
+        if st.session_state.get("active_contract_id"):
+            apply_active_contract(st.session_state.active_contract_id, force=True)
+        else:
+            clear_active_contract_context()
         st.switch_page("pages/01_upload.py")
 with c2:
-    if st.button("Comparar versões", use_container_width=True):
+    if st.button("Comparar / Proposta × Contrato", width="stretch"):
         st.switch_page("pages/02_compare.py")
 with c3:
-    if st.button("Revisar comentários", use_container_width=True):
-        st.switch_page("pages/03_comments.py")
-with c4:
-    if st.button("Histórico", use_container_width=True):
+    if st.button("Histórico", width="stretch"):
         st.switch_page("pages/04_history.py")
 
 section_title("Módulos do sistema")
-f1, f2, f3, f4 = st.columns(4)
+f1, f2, f3 = st.columns(3)
 features = [
-    (f1, "Checklist", "Verifique cláusulas obrigatórias e requisitos mínimos com IA."),
-    (f2, "Comparação", "Análise contratual criteriosa entre versões do mesmo documento."),
-    (f3, "Comentários", "Revise comentários da contraparte e gere respostas sugeridas."),
-    (f4, "Histórico", "Consulte análises anteriores por cliente e contrato."),
+    (f1, "Análise inicial", "Matriz ou checklist + comentários de revisão no PDF/DOCX."),
+    (f2, "Comparação", "Diff entre versões com verificação de comentários atendidos."),
+    (f3, "Histórico", "Consulte análises e listas de comentários anteriores."),
 ]
 for col, title, desc in features:
     with col:

@@ -27,6 +27,9 @@ def resolve_model_name(name: str) -> str:
 
 
 def get_llm(temperature: float = 0, max_output_tokens: int | None = None) -> ChatGoogleGenerativeAI:
+    from app.utils.windows_runtime import ensure_runtime_ok
+
+    ensure_runtime_ok()
     settings = get_settings()
     if not settings.google_api_key:
         raise ValueError(

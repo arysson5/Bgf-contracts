@@ -7,7 +7,7 @@ mammoth>=1.8.0
 python-docx>=1.1.0
 pdfplumber>=0.11.0
 pymupdf>=1.24.0
-unstructured[docx,pdf]>=0.14.0
+# Extração via mammoth / pdfplumber / pymupdf (sem unstructured/torch)
 
 # AI e LLM (Google Gemini)
 langchain>=0.2.0

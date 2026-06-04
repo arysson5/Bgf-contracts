@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.db import database as db
+from app.db import database as db  # noqa: F401 — usado na sidebar
 from app.utils.data_cache import cached_contracts
 from app.utils.datetime_br import format_brazil_datetime
+from app.utils.active_contract import ensure_active_contract_applied, on_sidebar_contract_changed
 from app.utils.ui import init_session_state
 
 # Paleta corporativa
@@ -25,9 +26,12 @@ COLORS = {
 }
 
 ANALYSIS_LABELS = {
-    "checklist": "Checklist",
+    "checklist": "Checklist (requisitos)",
+    "matrix_initial": "Análise inicial (parâmetros)",
     "diff": "Análise contratual",
-    "comments": "Revisão de comentários",
+    "comments": "Revisão de comentários (legado)",
+    "document_comments": "Comentários no documento",
+    "matrix": "Proposta × Contrato",
 }
 
 CORPORATE_CSS = f"""
@@ -362,6 +366,7 @@ def setup_page(
     inject_corporate_theme()
     if with_sidebar:
         render_app_sidebar()
+        ensure_active_contract_applied()
 
 
 def page_header(title: str, subtitle: str = "") -> None:
@@ -430,7 +435,9 @@ def render_app_sidebar() -> None:
 
         contracts = cached_contracts()
         if contracts:
-            options = {f"{c.name}": c.id for c in contracts}
+            options = {
+                f"{c.name} ({c.client_name}) · {c.id[:6]}": c.id for c in contracts
+            }
             labels = list(options.keys())
             idx = 0
             if st.session_state.active_contract_id:
@@ -439,19 +446,25 @@ def render_app_sidebar() -> None:
                         idx = i
                         break
             sel = st.selectbox("Contrato ativo", labels, index=idx, key="sidebar_contract")
-            st.session_state.active_contract_id = options[sel]
+            on_sidebar_contract_changed(options[sel])
+            active = next((c for c in contracts if c.id == options[sel]), None)
+            if active and db.contract_has_proposal(active):
+                st.caption(f"📎 Proposta: {active.proposal_label}")
+            elif active:
+                st.caption("⚠️ Sem proposta vinculada")
         else:
             st.caption("Nenhum contrato cadastrado")
 
-        if st.button("Novo contrato", use_container_width=True, type="primary"):
-            st.session_state.active_contract_id = None
+        if st.button("Novo contrato", width="stretch", type="primary"):
+            from app.utils.active_contract import clear_active_contract_context
+
+            clear_active_contract_context()
             st.switch_page("pages/01_upload.py")
 
         st.divider()
         st.page_link("main.py", label="Início")
-        st.page_link("pages/01_upload.py", label="Upload & Checklist")
+        st.page_link("pages/01_upload.py", label="Upload & Análise inicial")
         st.page_link("pages/02_compare.py", label="Comparar versões")
-        st.page_link("pages/03_comments.py", label="Revisar comentários")
         st.page_link("pages/04_history.py", label="Histórico")
         st.divider()
         st.caption("Powered by Google Gemini")

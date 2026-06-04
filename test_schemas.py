@@ -3,14 +3,20 @@
 from datetime import datetime, timezone
 
 from app.models.schemas import (
+    ChangeRisk,
     CommentReview,
     CommentsReviewResult,
     CommentStatus,
     ContractChecklistResult,
     ContractDiffResult,
+    ContractMatrixInitialResult,
     DiffBlock,
     DiffType,
     DocumentType,
+    MatrixItemResult,
+    MatrixItemStatus,
+    MatrixParameterCheck,
+    ProposalContractMatrixResult,
     RequirementCheck,
 )
 
@@ -55,11 +61,16 @@ def main() -> None:
         contract_id="contract-abc",
         version_a_label="Original",
         version_b_label="Versão Cliente 1",
+        executive_summary="Alterações menores em cláusulas de pagamento.",
+        recommendation="Revisar prazo de pagamento.",
+        material_changes_count=2,
+        high_risk_count=0,
+        has_significant_changes=False,
+        contractual_changes=[],
         diff_blocks=[block],
         total_additions=3,
         total_removals=1,
         similarity_score=0.92,
-        has_significant_changes=False,
         summary="Alterações menores em cláusulas de pagamento.",
     )
     print(diff.model_dump_json(indent=2))
@@ -85,6 +96,58 @@ def main() -> None:
         admin_summary="2 de 3 comentários precisam de atenção adicional.",
     )
     print(comments_result.model_dump_json(indent=2))
+
+    print("\n=== MatrixItemResult + ProposalContractMatrixResult ===")
+    item = MatrixItemResult(
+        item_id="row-1",
+        categoria="Valor e Modelo de Precificação",
+        parametro_verificacao="Comparar valor total do contrato x valor da proposta.",
+        risco_padrao="Custo extra fora do escopo",
+        status=MatrixItemStatus.OBRIGACAO_ADICIONAL,
+        contrato_evidencia="R$ 79.830,00 referente ao serviço.",
+        proposta_evidencia="R$ 14.370,00 de despesas reembolsáveis.",
+        divergencia="Despesas de viagem reembolsáveis não previstas no valor fechado.",
+        impacto="Possível custo adicional ao contratante.",
+        recomendacao="Formalizar reembolso via aditivo.",
+        gera_obrigacao_adicional=True,
+        risk_level=ChangeRisk.HIGH,
+    )
+    matrix = ProposalContractMatrixResult(
+        analysis_id="matrix-abc",
+        proposal_label="Proposta 51042026",
+        contract_label="Contrato BVV",
+        executive_summary="Identificadas divergências em valor e documentação.",
+        items=[item],
+        divergences_count=1,
+        additional_obligations=["Valor: despesas reembolsáveis não previstas."],
+        risk_alerts=["[alto] Valor: despesas reembolsáveis não previstas."],
+        high_risk_count=1,
+        analysis_timestamp=datetime.now(timezone.utc),
+    )
+    print(matrix.model_dump_json(indent=2))
+    restored = ProposalContractMatrixResult.model_validate_json(matrix.model_dump_json())
+    assert restored.divergences_count == 1
+    assert restored.items[0].status == MatrixItemStatus.OBRIGACAO_ADICIONAL
+
+    print("\n=== MatrixParameterCheck + ContractMatrixInitialResult ===")
+    param = MatrixParameterCheck(
+        item_id="m-1",
+        categoria="Escopo",
+        parametro_verificacao="Objeto do contrato alinhado ao QR.",
+        present=True,
+        confidence=0.9,
+        observation="Cláusula 1 descreve o objeto.",
+    )
+    initial = ContractMatrixInitialResult(
+        contract_id="contract-abc",
+        overall_score=1.0,
+        total_items=1,
+        items_met=1,
+        items_missing=0,
+        checks=[param],
+        analysis_timestamp=datetime.now(timezone.utc),
+    )
+    print(initial.model_dump_json(indent=2))
 
     print("\n[OK] Todos os schemas instanciados com sucesso.")
 

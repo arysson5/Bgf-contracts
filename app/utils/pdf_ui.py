@@ -1,6 +1,7 @@
 """Componentes Streamlit para visualização de PDF."""
 
 import base64
+import os
 from pathlib import Path
 
 import streamlit as st
@@ -10,9 +11,55 @@ from app.core.pdf_viewer import (
     COLOR_REMOVED,
     COLOR_HIGHLIGHT,
     find_text_locations,
+    get_pdf_page_count,
     render_page_image,
 )
-from app.models.schemas import DiffLocation, DiffType, TextLocation
+from app.models.schemas import DiffLocation, DiffType, PdfRect, TextLocation
+
+
+def _file_signature(path: str) -> float:
+    """Assinatura para invalidar cache quando o arquivo muda."""
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _cached_page_count(pdf_path: str, _sig: float) -> int:
+    return get_pdf_page_count(pdf_path)
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _cached_page_image(
+    pdf_path: str,
+    _sig: float,
+    page_num: int,
+    rects_key: tuple,
+    color: tuple,
+    zoom: float,
+) -> bytes:
+    rects = [PdfRect(x0=a, y0=b, x1=c, y1=d) for (a, b, c, d) in rects_key] or None
+    return render_page_image(pdf_path, page_num, rects, color, zoom)
+
+
+def page_count_cached(pdf_path: str) -> int:
+    """Contagem de páginas com cache (evita reabrir o PDF a cada rerun)."""
+    return _cached_page_count(pdf_path, _file_signature(pdf_path))
+
+
+def render_page_image_cached(
+    pdf_path: str,
+    page_num: int,
+    rects: list[PdfRect] | None = None,
+    color: tuple[float, float, float] = COLOR_HIGHLIGHT,
+    zoom: float = 1.5,
+) -> bytes:
+    """Renderiza página do PDF com cache por (arquivo, página, destaques, cor, zoom)."""
+    rects_key = tuple((r.x0, r.y0, r.x1, r.y1) for r in (rects or []))
+    return _cached_page_image(
+        pdf_path, _file_signature(pdf_path), page_num, rects_key, tuple(color), zoom
+    )
 
 def _show_pdf_fallback(path: Path, height: int, widget_key: str) -> None:
     """Visualização alternativa quando st.pdf não está disponível."""
@@ -121,18 +168,16 @@ def render_pdf_navigator(
         if total_pages:
             st.caption(f"Página {page_num} de {total_pages}")
 
-        with st.expander("Ver PDF completo"):
+        if st.checkbox("Ver PDF completo", key=f"{key_prefix}_show_full"):
             show_pdf(pdf_path, height=500, key=f"{key_prefix}_full")
 
     with col_pdf:
         try:
-            from app.core.pdf_viewer import get_pdf_page_count
-
-            total = get_pdf_page_count(pdf_path)
+            total = page_count_cached(pdf_path)
             st.session_state[f"{key_prefix}_total_pages"] = total
             page_num = min(max(1, page_num), total)
-            img = render_page_image(pdf_path, page_num, rects or None, color)
-            st.image(img, caption=f"Página {page_num}", use_container_width=True)
+            img = render_page_image_cached(pdf_path, page_num, rects or None, color)
+            st.image(img, caption=f"Página {page_num}", width="stretch")
         except Exception as exc:
             st.error(f"Erro ao renderizar página: {exc}")
 

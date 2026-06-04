@@ -1,13 +1,24 @@
 """Histórico de análises por cliente/contrato."""
 
+from pathlib import Path
+
 import streamlit as st
+
+from app.utils.dev_reload import sync_app_modules
+
+sync_app_modules(st.session_state)
 
 from app.db import database as db
 from app.models.schemas import (
+    ChangeRisk,
     CommentsReviewResult,
     CommentStatus,
     ContractChecklistResult,
     ContractDiffResult,
+    ContractMatrixInitialResult,
+    DocumentCommentsBundle,
+    MatrixItemStatus,
+    ProposalContractMatrixResult,
 )
 from app.utils.datetime_br import format_brazil_datetime
 from app.utils.document_ui import render_document_navigator
@@ -37,7 +48,16 @@ if not analyses:
     st.warning("Nenhuma análise salva.")
     st.stop()
 
-type_labels = {"checklist": "Checklist", "diff": "Análise contratual", "comments": "Comentários"}
+type_labels = {
+    "checklist": "Checklist (requisitos)",
+    "matrix_initial": "Análise inicial (parâmetros)",
+    "diff": "Análise contratual",
+    "comments": "Comentários (legado)",
+    "document_comments": "Comentários no documento",
+    "matrix": "Proposta × Contrato",
+}
+
+RISK_ICON = {ChangeRisk.HIGH: "🔴", ChangeRisk.MEDIUM: "🟡", ChangeRisk.LOW: "🟢"}
 options = [
     f"{format_brazil_datetime(rec.created_at)} — {type_labels.get(rec.analysis_type, rec.analysis_type)} (v{ver.version_number} {ver.label})"
     for rec, ver in analyses
@@ -57,6 +77,15 @@ if st.button("Carregar na sessão", type="primary"):
         p = data.get("annotated_file_path") or data.get("annotated_pdf_path")
         if p:
             st.session_state.annotated_file_path = p
+    elif record.analysis_type == "matrix":
+        st.session_state.last_matrix_result = ProposalContractMatrixResult.model_validate(data)
+    elif record.analysis_type == "matrix_initial":
+        st.session_state.last_matrix_initial_result = ContractMatrixInitialResult.model_validate(data)
+    elif record.analysis_type == "document_comments":
+        bundle = DocumentCommentsBundle.model_validate(data)
+        if "document_comments_bundles" not in st.session_state:
+            st.session_state.document_comments_bundles = {}
+        st.session_state.document_comments_bundles[bundle.version_id] = bundle.model_dump()
     st.success("Carregado.")
 
 st.divider()
@@ -126,3 +155,70 @@ elif record.analysis_type == "comments":
         else:
             from app.core.docx_viewer import render_docx_paragraphs_html
             st.markdown(render_docx_paragraphs_html(path), unsafe_allow_html=True)
+
+elif record.analysis_type == "document_comments":
+    bundle = DocumentCommentsBundle.model_validate(data)
+    st.write(f"**{len(bundle.comments)} comentário(s)** na versão")
+    for draft in bundle.comments:
+        st.write(f"- [{draft.source.value}] {draft.comment_text[:200]}")
+    path = bundle.annotated_file_path
+    if path and Path(path).exists():
+        if version.file_type == "pdf":
+            show_pdf(path, height=500, key=f"hist_dc_{record.id}")
+        else:
+            from app.core.docx_viewer import render_docx_paragraphs_html
+
+            st.markdown(render_docx_paragraphs_html(path), unsafe_allow_html=True)
+
+elif record.analysis_type == "matrix_initial":
+    result = ContractMatrixInitialResult.model_validate(data)
+    st.info(result.executive_summary)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Atendidos", f"{result.items_met}/{result.total_items}")
+    m2.metric("Score", f"{result.overall_score:.0%}")
+    m3.metric("Alertas", len(result.risk_alerts))
+    for check in result.checks:
+        icon = "✅" if check.present else "❌"
+        risk = RISK_ICON.get(check.risk_level, "")
+        with st.expander(f"{icon} {check.categoria} {risk}"):
+            st.caption(f"**Parâmetro:** {check.parametro_verificacao}")
+            if check.risco_padrao:
+                st.caption(f"**Risco:** {check.risco_padrao}")
+            st.write(check.observation)
+            if check.found_excerpt:
+                st.code(check.found_excerpt)
+    if result.risk_alerts:
+        for alert in result.risk_alerts:
+            st.warning(alert)
+
+elif record.analysis_type == "matrix":
+    result = ProposalContractMatrixResult.model_validate(data)
+    st.info(result.executive_summary)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Divergências", result.divergences_count)
+    m2.metric("Alto risco", result.high_risk_count)
+    m3.metric("Obrigações adicionais", len(result.additional_obligations))
+    status_icon = {
+        MatrixItemStatus.CONFORME: "✅",
+        MatrixItemStatus.DIVERGENTE: "⚠️",
+        MatrixItemStatus.AUSENTE_CONTRATO: "➕",
+        MatrixItemStatus.AUSENTE_PROPOSTA: "➖",
+        MatrixItemStatus.OBRIGACAO_ADICIONAL: "📌",
+    }
+    for it in result.items:
+        with st.expander(f"{status_icon.get(it.status, '•')} {it.categoria} — {it.status.value}"):
+            st.caption(f"**Parâmetro:** {it.parametro_verificacao}")
+            if it.divergencia:
+                st.write(f"**Divergência:** {it.divergencia}")
+            if it.impacto:
+                st.write(f"**Impacto:** {it.impacto}")
+            if it.recomendacao:
+                st.success(f"**Recomendação:** {it.recomendacao}")
+    if result.risk_alerts:
+        st.markdown("**Alertas de risco**")
+        for alert in result.risk_alerts:
+            st.warning(alert)
+    if result.additional_obligations:
+        st.markdown("**Obrigações adicionais**")
+        for ob in result.additional_obligations:
+            st.write(f"- {ob}")

@@ -11,6 +11,11 @@ address = "127.0.0.1"
 enableCORS = false
 enableXsrfProtection = true
 maxUploadSize = 50
+# Desliga o watcher de arquivos: evita varredura pesada do venv a cada rerun.
+# Alterações em app/ são recarregadas via app.utils.dev_reload nas páginas.
+# Após mudanças grandes, reinicie o servidor (Ctrl+C e run.bat).
+fileWatcherType = "none"
+runOnSave = false
 
 [browser]
 gatherUsageStats = false

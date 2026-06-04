@@ -1,0 +1,582 @@
+"""Comentários inline: trecho marcado no documento + confirmar/descartar + gravação imediata."""
+
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+import streamlit as st
+
+from app.core.comment_suggester import (
+    review_needs_reinforcement,
+    suggest_for_checklist_gap,
+    suggest_for_matrix_divergence,
+    suggest_for_matrix_gap,
+    suggest_reinforcement,
+)
+from app.core.document_annotator import add_comment_to_document
+from app.core.document_locator import find_in_document
+from app.core.comment_suggester import matrix_item_needs_comment  # noqa: F401
+from app.db import database as db
+from app.models.schemas import (
+    CommentReview,
+    CommentStatus,
+    CommentsReviewResult,
+    DocumentCommentSource,
+    MatrixParameterCheck,
+    RequirementCheck,
+    VersionRegressionAlert,
+    VersionRegressionResult,
+)
+from app.utils.comments_ui import (
+    _ensure_work_file,
+    get_comments_bundle,
+    load_comments_from_file,
+)
+from app.utils.document_ui import render_focused_excerpt
+from app.utils.theme import section_title
+
+_QUEUE_KEY = "inline_comment_queue"
+_STATUS_BADGE = {
+    CommentStatus.ATTENDED: "✅ Atendido",
+    CommentStatus.PARTIALLY: "⚠️ Parcial",
+    CommentStatus.NOT_ATTENDED: "❌ Não atendido",
+}
+
+
+def _nav_task_key(version_id: str, key_prefix: str) -> str:
+    return f"{key_prefix}_inline_nav_task_{version_id}"
+
+
+def _nav_pick_key(version_id: str, key_prefix: str) -> str:
+    return f"{key_prefix}_inline_nav_idx_{version_id}"
+
+
+def _rebuild_flag_key(version_id: str, key_prefix: str) -> str:
+    return f"{key_prefix}_rebuild_{version_id}"
+
+
+def mark_comment_queue_for_rebuild(version_id: str, key_prefix: str = "inl") -> None:
+    """Marca a fila para ser recriada na próxima renderização (ex.: após nova análise)."""
+    st.session_state[_rebuild_flag_key(version_id, key_prefix)] = True
+
+
+def _queue_store() -> dict[str, list[dict]]:
+    if _QUEUE_KEY not in st.session_state:
+        st.session_state[_QUEUE_KEY] = {}
+    return st.session_state[_QUEUE_KEY]
+
+
+def _pending_tasks(queue: list[dict]) -> list[dict]:
+    return [t for t in queue if t.get("status") == "pending"]
+
+
+def _task_page_label(task: dict) -> str:
+    locs = task.get("locations") or []
+    if locs and isinstance(locs[0], dict):
+        page = locs[0].get("page")
+        if page:
+            return f"Pág.{page} · "
+    return ""
+
+
+def _task_short_label(task: dict, index: int, total: int) -> str:
+    preview = (task.get("comment_text") or "").replace("\n", " ").strip()[:72]
+    kind = task.get("kind", "suggestion")
+    prefix = "↩ " if kind == "unattended" else ""
+    src = (task.get("source") or "").replace("_", " ")[:18]
+    return f"{index + 1}/{total} {prefix}{_task_page_label(task)}{preview}… [{src}]"
+
+
+def _resolve_current_task(
+    pending: list[dict],
+    version_id: str,
+    key_prefix: str,
+) -> tuple[dict, int]:
+    nav_key = _nav_task_key(version_id, key_prefix)
+    by_id = {t["task_id"]: t for t in pending}
+    current_id = st.session_state.get(nav_key)
+
+    if current_id not in by_id:
+        current_id = pending[0]["task_id"]
+        st.session_state[nav_key] = current_id
+
+    task = by_id[current_id]
+    idx = pending.index(task)
+    pick_key = _nav_pick_key(version_id, key_prefix)
+    st.session_state[pick_key] = idx
+    return task, idx
+
+
+def _set_nav_task(
+    version_id: str,
+    key_prefix: str,
+    task_id: str | None,
+    *,
+    pick_index: int | None = None,
+) -> None:
+    nav_key = _nav_task_key(version_id, key_prefix)
+    if task_id:
+        st.session_state[nav_key] = task_id
+    else:
+        st.session_state.pop(nav_key, None)
+    if pick_index is not None:
+        st.session_state[_nav_pick_key(version_id, key_prefix)] = pick_index
+
+
+def _next_task_id_after_action(pending: list[dict], current_id: str) -> str | None:
+    """Próximo item pendente após confirmar/descartar o atual."""
+    ids = [t["task_id"] for t in pending]
+    if current_id not in ids:
+        return ids[0] if ids else None
+    pos = ids.index(current_id)
+    if pos + 1 < len(ids):
+        return ids[pos + 1]
+    if pos > 0:
+        return ids[pos - 1]
+    return None
+
+
+def _build_task(
+    *,
+    comment_text: str,
+    anchor_text: str | None,
+    source: DocumentCommentSource,
+    source_ref: str | None = None,
+    kind: str = "suggestion",
+    original_comment: str | None = None,
+    review_status: str | None = None,
+    file_path: str | None = None,
+    categoria: str | None = None,
+) -> dict:
+    locs = []
+    if file_path and anchor_text:
+        locs = [loc.model_dump() for loc in find_in_document(file_path, anchor_text)]
+    return {
+        "task_id": str(uuid.uuid4())[:8],
+        "comment_text": comment_text,
+        "anchor_text": anchor_text,
+        "locations": locs,
+        "source": source.value,
+        "source_ref": source_ref,
+        "kind": kind,
+        "original_comment": original_comment,
+        "review_status": review_status,
+        "status": "pending",
+        "categoria": categoria,
+    }
+
+
+def _enqueue_tasks(version_id: str, tasks: list[dict], *, replace: bool = False) -> None:
+    store = _queue_store()
+    if replace or version_id not in store:
+        store[version_id] = []
+    existing_ids = {t["task_id"] for t in store[version_id]}
+    for t in tasks:
+        if t["task_id"] not in existing_ids:
+            store[version_id].append(t)
+            existing_ids.add(t["task_id"])
+
+
+def _tasks_from_analysis(
+    file_path: str,
+    *,
+    matrix_checks: list[MatrixParameterCheck] | None = None,
+    checklist_checks: list[RequirementCheck] | None = None,
+    matrix_items: list | None = None,
+    regressions: list[VersionRegressionAlert] | None = None,
+) -> list[dict]:
+    tasks: list[dict] = []
+    if matrix_checks:
+        for ch in matrix_checks:
+            if ch.present and ch.aligns_with_proposal is not False:
+                continue
+            text = suggest_for_matrix_gap(ch)
+            anchor = ch.found_excerpt or ch.proposal_excerpt or ch.page_hint
+            tasks.append(
+                _build_task(
+                    comment_text=text,
+                    anchor_text=anchor,
+                    source=DocumentCommentSource.MATRIX_GAP,
+                    source_ref=ch.item_id,
+                    file_path=file_path,
+                    categoria=ch.categoria,
+                )
+            )
+    if checklist_checks:
+        for ch in checklist_checks:
+            if ch.present:
+                continue
+            tasks.append(
+                _build_task(
+                    comment_text=suggest_for_checklist_gap(ch),
+                    anchor_text=ch.found_excerpt or ch.page_hint,
+                    source=DocumentCommentSource.CHECKLIST_GAP,
+                    source_ref=ch.requirement_id,
+                    file_path=file_path,
+                )
+            )
+    if matrix_items:
+        for it in matrix_items:
+            if not matrix_item_needs_comment(it):  # type: ignore[arg-type]
+                continue
+            tasks.append(
+                _build_task(
+                    comment_text=suggest_for_matrix_divergence(it),
+                    anchor_text=it.contrato_evidencia or it.proposta_evidencia,
+                    source=DocumentCommentSource.MATRIX_DIVERGENCE,
+                    source_ref=it.item_id,
+                    file_path=file_path,
+                    categoria=getattr(it, "categoria", None),
+                )
+            )
+    if regressions:
+        for alert in regressions:
+            anchor = alert.contract_excerpt or alert.proposal_excerpt
+            text = (
+                f"[Regressão na {alert.title}] {alert.description} "
+                f"Impacto: {alert.negotiation_impact}"
+            )
+            tasks.append(
+                _build_task(
+                    comment_text=text[:1200],
+                    anchor_text=anchor,
+                    source=DocumentCommentSource.REINFORCEMENT,
+                    source_ref=alert.alert_id,
+                    kind="regression",
+                    file_path=file_path,
+                )
+            )
+    return tasks
+
+
+def _tasks_from_verification(
+    verification: CommentsReviewResult,
+    file_path: str,
+) -> list[dict]:
+    tasks: list[dict] = []
+    for rev in verification.reviews:
+        if not review_needs_reinforcement(rev):
+            continue
+        anchor = rev.referenced_excerpt or rev.change_found
+        locs = find_in_document(file_path, anchor or rev.original_comment[:120])
+        tasks.append(
+            {
+                "task_id": f"ver_{rev.comment_id}",
+                "comment_text": suggest_reinforcement(rev),
+                "anchor_text": anchor,
+                "locations": [loc.model_dump() for loc in locs],
+                "source": DocumentCommentSource.REINFORCEMENT.value,
+                "source_ref": rev.comment_id,
+                "kind": "unattended",
+                "original_comment": rev.original_comment,
+                "review_status": rev.status.value,
+                "status": "pending",
+            }
+        )
+    return tasks
+
+
+def _apply_task_to_file(
+    version,
+    task: dict,
+    bundle,
+) -> str:
+    from app.models.schemas import TextLocation
+
+    work = _ensure_work_file(bundle, version.file_path)
+    locs = [TextLocation.model_validate(x) for x in task.get("locations") or []]
+    work = add_comment_to_document(
+        work,
+        task["comment_text"],
+        anchor_text=task.get("anchor_text"),
+        locations=locs,
+        output_path=work,
+    )
+    bundle.annotated_file_path = work
+    from app.utils.comments_ui import _save_bundle
+
+    _save_bundle(bundle)
+    return work
+
+
+def _render_comment_navigator(
+    pending: list[dict],
+    task: dict,
+    idx: int,
+    *,
+    version_id: str,
+    key_prefix: str,
+) -> None:
+    """Barra de navegação entre sugestões pendentes."""
+    total = len(pending)
+    st.markdown("**Navegar entre sugestões**")
+
+    pick_key = _nav_pick_key(version_id, key_prefix)
+
+    c_prev, c_jump, c_next, c_pos = st.columns([1, 3, 1, 1])
+    with c_prev:
+        if st.button(
+            "◀ Anterior",
+            key=f"{key_prefix}_nav_prev_{version_id}",
+            disabled=idx <= 0,
+            width="stretch",
+        ):
+            new_idx = idx - 1
+            _set_nav_task(
+                version_id,
+                key_prefix,
+                pending[new_idx]["task_id"],
+                pick_index=new_idx,
+            )
+            st.rerun()
+    with c_next:
+        if st.button(
+            "Próximo ▶",
+            key=f"{key_prefix}_nav_next_{version_id}",
+            disabled=idx >= total - 1,
+            width="stretch",
+        ):
+            new_idx = idx + 1
+            _set_nav_task(
+                version_id,
+                key_prefix,
+                pending[new_idx]["task_id"],
+                pick_index=new_idx,
+            )
+            st.rerun()
+    with c_pos:
+        st.caption(f"**{idx + 1}** / {total}")
+
+    with c_jump:
+        labels = [_task_short_label(t, i, total) for i, t in enumerate(pending)]
+        st.selectbox(
+            "Ir diretamente para",
+            range(total),
+            format_func=lambda i: labels[i],
+            label_visibility="collapsed",
+            key=pick_key,
+        )
+        picked = st.session_state[pick_key]
+        if picked != idx:
+            _set_nav_task(
+                version_id,
+                key_prefix,
+                pending[picked]["task_id"],
+                pick_index=picked,
+            )
+            st.rerun()
+
+    with st.expander(f"Lista rápida ({total} pendentes)", expanded=total <= 6):
+        cols = st.columns(min(total, 4))
+        for i, t in enumerate(pending):
+            col = cols[i % len(cols)]
+            active = t["task_id"] == task["task_id"]
+            label = f"{'● ' if active else ''}{i + 1}"
+            if col.button(
+                label,
+                key=f"{key_prefix}_nav_chip_{version_id}_{t['task_id']}",
+                type="primary" if active else "secondary",
+                width="stretch",
+            ):
+                _set_nav_task(
+                    version_id,
+                    key_prefix,
+                    t["task_id"],
+                    pick_index=i,
+                )
+                st.rerun()
+
+
+def render_inline_comments_workspace(
+    version,
+    *,
+    matrix_checks: list[MatrixParameterCheck] | None = None,
+    checklist_checks: list[RequirementCheck] | None = None,
+    matrix_items: list | None = None,
+    verification: CommentsReviewResult | None = None,
+    regression: VersionRegressionResult | None = None,
+    key_prefix: str = "inl",
+    rebuild_queue: bool = False,
+) -> None:
+    section_title("Comentários no documento (inline)")
+    st.caption(
+        "Cada sugestão abre o trecho marcado no PDF/DOCX. Use **Anterior / Próximo** ou a lista "
+        "para navegar. **Confirmar** grava o comentário no arquivo no padrão dos PDFs de referência BGF."
+    )
+
+    bundle = get_comments_bundle(version.id, version.contract_id)
+    file_path = bundle.annotated_file_path or version.file_path
+    file_type = version.file_type
+    vid = version.id
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        if st.button("📎 Importar comentários do arquivo", key=f"{key_prefix}_imp"):
+            load_comments_from_file(bundle, version.file_path)
+            st.rerun()
+    with col_b:
+        if st.button("🔄 Gerar fila de sugestões", key=f"{key_prefix}_gen"):
+            rebuild_queue = True
+    with col_c:
+        if st.button("🗑️ Limpar fila", key=f"{key_prefix}_clr"):
+            _queue_store()[vid] = []
+            _set_nav_task(vid, key_prefix, None)
+            st.rerun()
+
+    rebuild_flag = st.session_state.pop(_rebuild_flag_key(vid, key_prefix), False)
+    do_rebuild = rebuild_queue or rebuild_flag
+    has_sources = bool(
+        matrix_checks
+        or checklist_checks
+        or matrix_items
+        or (verification and verification.reviews)
+        or (regression and regression.alerts)
+    )
+    queue_missing = vid not in _queue_store()
+
+    if do_rebuild or (queue_missing and has_sources):
+        new_tasks = _tasks_from_analysis(
+            version.file_path,
+            matrix_checks=matrix_checks,
+            checklist_checks=checklist_checks,
+            matrix_items=matrix_items,
+            regressions=regression.alerts if regression else None,
+        )
+        if verification:
+            new_tasks.extend(_tasks_from_verification(verification, version.file_path))
+        _enqueue_tasks(vid, new_tasks, replace=do_rebuild)
+        if do_rebuild or queue_missing:
+            pending_new = [t for t in new_tasks if t.get("status") == "pending"]
+            if pending_new:
+                _set_nav_task(vid, key_prefix, pending_new[0]["task_id"], pick_index=0)
+
+    queue = _queue_store().get(vid, [])
+    pending = _pending_tasks(queue)
+    applied = sum(1 for t in queue if t.get("status") == "applied")
+    discarded = sum(1 for t in queue if t.get("status") == "discarded")
+
+    if regression and regression.alerts:
+        st.warning(regression.executive_summary)
+        with st.expander(f"Alertas de regressão ({len(regression.alerts)})", expanded=False):
+            for alert in regression.alerts:
+                st.write(f"**{alert.title}** — {alert.description}")
+
+    if verification and verification.reviews:
+        st.info(verification.admin_summary)
+
+    if queue:
+        st.caption(
+            f"Fila: **{len(pending)}** pendente(s) · **{applied}** gravado(s) · **{discarded}** descartado(s)"
+        )
+
+    if not pending:
+        st.success("Nenhuma sugestão pendente na fila.")
+        work = bundle.annotated_file_path
+        if work and Path(work).exists():
+            with open(work, "rb") as f:
+                st.download_button(
+                    "⬇️ Baixar documento revisado",
+                    f.read(),
+                    file_name=Path(work).name,
+                    key=f"{key_prefix}_dl",
+                )
+        return
+
+    task, idx = _resolve_current_task(pending, vid, key_prefix)
+    _render_comment_navigator(pending, task, idx, version_id=vid, key_prefix=key_prefix)
+
+    st.progress((idx + 1) / len(pending), text=f"Sugestão {idx + 1} de {len(pending)}")
+
+    kind = task.get("kind", "suggestion")
+    if kind == "unattended":
+        try:
+            rev_status = CommentStatus(task["review_status"])
+        except (ValueError, KeyError):
+            rev_status = CommentStatus.NOT_ATTENDED
+        badge = _STATUS_BADGE.get(rev_status, "❌ Pendente")
+        st.error(f"{badge} — Comentário anterior não atendido")
+        if task.get("original_comment"):
+            st.markdown(f"**Comentário original:** {task['original_comment']}")
+
+    from app.models.schemas import TextLocation
+
+    locs = [TextLocation.model_validate(x) for x in (task.get("locations") or [])]
+    if not locs and task.get("anchor_text"):
+        locs = find_in_document(file_path, task["anchor_text"])
+        task["locations"] = [loc.model_dump() for loc in locs]
+
+    col_doc, col_act = st.columns([3, 2])
+    with col_doc:
+        render_focused_excerpt(
+            file_path,
+            file_type,
+            locs,
+            caption="Trecho marcado",
+        )
+        if task.get("anchor_text"):
+            st.caption("Âncora")
+            st.code(task["anchor_text"][:600])
+
+    with col_act:
+        if task.get("categoria"):
+            st.caption(f"Categoria: **{task['categoria']}**")
+        edited = st.text_area(
+            "Texto do comentário",
+            task["comment_text"],
+            height=160,
+            key=f"{key_prefix}_txt_{task['task_id']}",
+        )
+        manual_anchor = st.text_input(
+            "Ajustar trecho âncora (opcional)",
+            value=task.get("anchor_text") or "",
+            key=f"{key_prefix}_anc_{task['task_id']}",
+        )
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("✅ Confirmar", type="primary", key=f"{key_prefix}_ok_{task['task_id']}"):
+                task["comment_text"] = edited
+                if manual_anchor.strip():
+                    task["anchor_text"] = manual_anchor.strip()
+                    task["locations"] = [
+                        loc.model_dump()
+                        for loc in find_in_document(file_path, task["anchor_text"])
+                    ]
+                try:
+                    _apply_task_to_file(version, task, bundle)
+                    task["status"] = "applied"
+                    next_id = _next_task_id_after_action(pending, task["task_id"])
+                    _set_nav_task(vid, key_prefix, next_id)
+                    st.success("Comentário gravado no documento.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+        with c2:
+            if st.button("Descartar", key=f"{key_prefix}_no_{task['task_id']}"):
+                task["status"] = "discarded"
+                next_id = _next_task_id_after_action(pending, task["task_id"])
+                _set_nav_task(vid, key_prefix, next_id)
+                st.rerun()
+
+    st.divider()
+    st.markdown("**Marcar trecho manualmente**")
+    manual_text = st.text_area("Comentário", key=f"{key_prefix}_manual_txt", height=70)
+    manual_anchor2 = st.text_input("Trecho do contrato", key=f"{key_prefix}_manual_anc")
+    if st.button("Adicionar à fila", key=f"{key_prefix}_manual_add") and manual_text.strip():
+        _enqueue_tasks(
+            vid,
+            [
+                _build_task(
+                    comment_text=manual_text,
+                    anchor_text=manual_anchor2 or None,
+                    source=DocumentCommentSource.MANUAL,
+                    file_path=version.file_path,
+                )
+            ],
+        )
+        st.rerun()
+
+    if st.button("Salvar fila no histórico", key=f"{key_prefix}_save_db"):
+        db.save_analysis_result(version.id, "document_comments", bundle)
+        st.success("Salvo.")

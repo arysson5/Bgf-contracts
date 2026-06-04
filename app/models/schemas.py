@@ -2,7 +2,7 @@ import uuid
 
 from pydantic import BaseModel, Field
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -100,6 +100,66 @@ class ContractChecklistResult(BaseModel):
     requirements_missing: int
     checks: list[RequirementCheck]
     critical_missing: list[str]
+    analysis_timestamp: datetime
+
+
+# --- Análise inicial por parâmetros de verificação (documento único) ---
+
+class MatrixParameterCheck(BaseModel):
+    """Verificação de um parâmetro da matriz no contrato (com referência opcional à proposta)."""
+    item_id: str
+    categoria: str
+    parametro_verificacao: str
+    risco_padrao: str = ""
+    present: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    found_excerpt: Optional[str] = None
+    proposal_excerpt: Optional[str] = None
+    aligns_with_proposal: Optional[bool] = None
+    page_hint: Optional[str] = None
+    observation: str
+    validation_steps: str = ""
+    risk_level: ChangeRisk = ChangeRisk.LOW
+    locations: list[TextLocation] = []
+
+
+class ContractMatrixInitialResult(BaseModel):
+    """Resultado da análise inicial do contrato contra a matriz de parâmetros."""
+    contract_id: str
+    executive_summary: str = ""
+    overall_score: float = Field(ge=0.0, le=1.0)
+    total_items: int
+    items_met: int
+    items_missing: int
+    checks: list[MatrixParameterCheck]
+    critical_gaps: list[str] = []
+    risk_alerts: list[str] = []
+    proposal_used: bool = False
+    proposal_label: str = ""
+    analysis_mode: str = ""
+    analysis_timestamp: datetime
+
+
+class VersionRegressionAlert(BaseModel):
+    """Alerta: retirada ou enfraquecimento na nova versão vs proposta/matriz."""
+    alert_id: str
+    title: str
+    description: str
+    matrix_item_id: Optional[str] = None
+    contract_excerpt: Optional[str] = None
+    proposal_excerpt: Optional[str] = None
+    removed_in_new_version: bool = True
+    risk_level: ChangeRisk = ChangeRisk.HIGH
+    negotiation_impact: str = ""
+
+
+class VersionRegressionResult(BaseModel):
+    contract_id: str
+    base_version_label: str = ""
+    new_version_label: str = ""
+    proposal_label: str = ""
+    executive_summary: str = ""
+    alerts: list[VersionRegressionAlert] = []
     analysis_timestamp: datetime
 
 
@@ -250,7 +310,39 @@ def _legacy_diff_blocks_to_changes(blocks: list) -> list[ContractualChange]:
     return changes
 
 
-# --- Revisão de Comentários ---
+# --- Comentários ancorados no documento (revisão integrada) ---
+
+class DocumentCommentSource(str, Enum):
+    MANUAL = "manual"
+    EXTRACTED = "extracted"
+    MATRIX_GAP = "matrix_gap"
+    MATRIX_DIVERGENCE = "matrix_divergence"
+    CHECKLIST_GAP = "checklist_gap"
+    REINFORCEMENT = "reinforcement"
+
+
+class DocumentCommentDraft(BaseModel):
+    """Comentário de revisão a ser fixado no PDF/DOCX."""
+    comment_id: str
+    comment_text: str
+    anchor_text: Optional[str] = None
+    source: DocumentCommentSource = DocumentCommentSource.MANUAL
+    source_ref: Optional[str] = None
+    page_hint: Optional[str] = None
+    locations: list[TextLocation] = []
+    include_in_export: bool = True
+
+
+class DocumentCommentsBundle(BaseModel):
+    """Comentários pendentes/exportáveis de uma versão do contrato."""
+    version_id: str
+    contract_id: str
+    comments: list[DocumentCommentDraft] = []
+    annotated_file_path: Optional[str] = None
+    analysis_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# --- Revisão de Comentários (verificação entre versões) ---
 
 class CommentStatus(str, Enum):
     ATTENDED = "attended"
@@ -280,3 +372,45 @@ class CommentsReviewResult(BaseModel):
     overall_attended_rate: float
     admin_summary: str
     annotated_file_path: Optional[str] = None
+
+
+# --- Matriz de Análise Proposta x Contrato ---
+
+class MatrixItemStatus(str, Enum):
+    CONFORME = "conforme"
+    DIVERGENTE = "divergente"
+    AUSENTE_CONTRATO = "ausente_contrato"
+    AUSENTE_PROPOSTA = "ausente_proposta"
+    OBRIGACAO_ADICIONAL = "obrigacao_adicional"
+
+
+class MatrixItemResult(BaseModel):
+    """Resultado da análise de um item da matriz Proposta x Contrato."""
+    item_id: str
+    categoria: str
+    parametro_verificacao: str
+    risco_padrao: str = ""
+    status: MatrixItemStatus
+    contrato_evidencia: Optional[str] = None
+    proposta_evidencia: Optional[str] = None
+    divergencia: str = ""
+    impacto: str = ""
+    recomendacao: str = ""
+    gera_obrigacao_adicional: bool = False
+    risk_level: ChangeRisk = ChangeRisk.MEDIUM
+    locations_contrato: list[TextLocation] = []
+    locations_proposta: list[TextLocation] = []
+
+
+class ProposalContractMatrixResult(BaseModel):
+    """Relatório consolidado da comparação Proposta técnica/comercial x Contrato."""
+    analysis_id: str
+    proposal_label: str = "Proposta"
+    contract_label: str = "Contrato"
+    executive_summary: str
+    items: list[MatrixItemResult]
+    divergences_count: int
+    additional_obligations: list[str] = []
+    risk_alerts: list[str] = []
+    high_risk_count: int = 0
+    analysis_timestamp: datetime

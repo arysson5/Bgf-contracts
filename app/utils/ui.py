@@ -25,6 +25,21 @@ def init_session_state() -> None:
         "checklist_version_id": None,
         "quick_compare_ctx": None,
         "compare_mode_kind": None,
+        "last_matrix_result": None,
+        "last_matrix_initial_result": None,
+        "selected_matrix_template_id": None,
+        "matrix_mode_kind": None,
+        "matrix_quick_ctx": None,
+        "matrix_saved_ctx": None,
+        "last_regression_result": None,
+        "last_comment_verification": None,
+        "compare_base_idx": 0,
+        "compare_new_idx": 0,
+        "mtx_contract_ver_idx": 0,
+        "_applied_contract_id": None,
+        "upload_contract_name": "",
+        "upload_client_name": "",
+        "upload_version_label_default": "Original",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -36,7 +51,9 @@ def render_contract_selector(key: str = "contract_select") -> str | None:
     if not contracts:
         st.info("Nenhum contrato cadastrado. Faça upload na página de Checklist.")
         return None
-    options = {f"{c.name} ({c.client_name})": c.id for c in contracts}
+    options = {
+        f"{c.name} ({c.client_name}) · {c.id[:6]}": c.id for c in contracts
+    }
     labels = list(options.keys())
     default_idx = 0
     if st.session_state.active_contract_id:
@@ -46,7 +63,9 @@ def render_contract_selector(key: str = "contract_select") -> str | None:
                 break
     selected_label = st.selectbox("Contrato", labels, index=default_idx, key=key)
     contract_id = options[selected_label]
-    st.session_state.active_contract_id = contract_id
+    from app.utils.active_contract import on_sidebar_contract_changed
+
+    on_sidebar_contract_changed(contract_id)
     return contract_id
 
 

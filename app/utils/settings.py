@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     google_api_key: str = ""
     model_name: str = "gemini-2.5-flash"
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     contracts_dir: str = "./contracts"
     db_path: str = "./contract_analyzer.db"
 
