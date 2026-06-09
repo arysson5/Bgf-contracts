@@ -23,13 +23,14 @@ from app.models.schemas import (
 from app.utils.datetime_br import format_brazil_datetime
 from app.utils.document_ui import render_document_navigator
 from app.utils.pdf_ui import show_pdf
-from app.utils.theme import page_header, setup_page
+from app.utils.theme import page_header, render_page_footer, section_title, setup_page
 from app.utils.ui import render_contract_selector
 
 setup_page("Histórico de Análises", page_icon="📚")
 
 page_header("Histórico de Análises", "Consulte e recarregue análises anteriores por contrato.")
 
+section_title("Filtros e seleção")
 contracts = db.get_contracts()
 if not contracts:
     st.info("Nenhum contrato cadastrado.")
@@ -222,3 +223,5 @@ elif record.analysis_type == "matrix":
         st.markdown("**Obrigações adicionais**")
         for ob in result.additional_obligations:
             st.write(f"- {ob}")
+
+render_page_footer()

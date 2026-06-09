@@ -227,10 +227,14 @@ def add_comment_to_pdf(
                 point = rects[0].top_left
 
         annot = page.add_text_annot(point, comment_text)
-        annot.set_info(content=comment_text, title="BGF Revisão", icon="Comment")
+        annot.set_info(content=comment_text, title="BGF Revisão")
         annot.set_colors(stroke=COLOR_COMMENT)
         annot.update()
-        doc.save(str(dest), garbage=4, deflate=True)
+        # PyMuPDF exige salvamento incremental ao gravar no mesmo arquivo aberto
+        if Path(work_path).resolve() == Path(dest).resolve():
+            doc.saveIncr()
+        else:
+            doc.save(str(dest), garbage=4, deflate=True)
     finally:
         doc.close()
 

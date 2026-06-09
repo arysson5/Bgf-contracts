@@ -341,15 +341,51 @@ footer.ca-footer {{
     padding-top: 1rem;
     border-top: 1px solid {COLORS["border"]};
 }}
+
+/* Subtítulos nativos Streamlit */
+[data-testid="stSubheader"] {{
+    color: {COLORS["navy"]} !important;
+    font-weight: 700 !important;
+    padding-bottom: 0.35rem;
+    border-bottom: 2px solid {COLORS["gold"]};
+    display: inline-block;
+    margin-bottom: 0.75rem !important;
+}}
+
+/* Barra superior do Streamlit — sem linha amarela global */
+[data-testid="stHeader"],
+[data-testid="stDecoration"] {{
+    border-bottom: none !important;
+    background: transparent !important;
+}}
+
+/* Selectbox, inputs e dataframes */
+[data-testid="stSelectbox"] > div,
+[data-testid="stTextInput"] > div,
+[data-testid="stTextArea"] > div {{
+    border-radius: 8px;
+}}
+[data-testid="stDataFrame"] {{
+    border: 1px solid {COLORS["border"]};
+    border-radius: 10px;
+    overflow: hidden;
+}}
+
+/* Info / success / warning alinhados à paleta */
+[data-testid="stAlert"][data-baseweb="notification"] {{
+    border-radius: 10px;
+}}
+div[data-testid="stAlert"]:has(svg[data-testid="stIcon"]) {{
+    background: {COLORS["blue_light"]};
+    border-left: 4px solid {COLORS["blue"]};
+}}
 </style>
 """
 
 
 def inject_corporate_theme() -> None:
-    if st.session_state.get("_theme_injected"):
-        return
+    """Injeta CSS corporativo a cada rerun (necessário ao trocar de página no multipage)."""
     st.markdown(CORPORATE_CSS, unsafe_allow_html=True)
-    st.session_state["_theme_injected"] = True
 
 
 def setup_page(
@@ -369,10 +405,14 @@ def setup_page(
         ensure_active_contract_applied()
 
 
-def page_header(title: str, subtitle: str = "") -> None:
-    sub = f'<p class="subtitle">{subtitle}</p>' if subtitle else ""
+def page_header(title: str, subtitle: str = "", badge: str = "Contract Analyzer") -> None:
+    """Cabeçalho de página com o mesmo hero azul/amarelo da página inicial."""
+    hero_block(title, subtitle, badge=badge)
+
+
+def render_page_footer() -> None:
     st.markdown(
-        f'<div class="ca-page-header"><h1>{title}</h1>{sub}</div>',
+        '<footer class="ca-footer">Contract Analyzer · Análise jurídica assistida por IA</footer>',
         unsafe_allow_html=True,
     )
 
@@ -464,7 +504,7 @@ def render_app_sidebar() -> None:
         st.divider()
         st.page_link("main.py", label="Início")
         st.page_link("pages/01_upload.py", label="Upload & Análise inicial")
-        st.page_link("pages/02_compare.py", label="Comparar versões")
+        st.page_link("pages/02_compare.py", label="Comparar versões (comentários)")
         st.page_link("pages/04_history.py", label="Histórico")
         st.divider()
         st.caption("Powered by Google Gemini")

@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     max_tokens: int = 16384
     contracts_dir: str = "./contracts"
     db_path: str = "./contract_analyzer.db"
+    export_dir: str = ""
+
+    @property
+    def export_path(self) -> Path | None:
+        if not self.export_dir.strip():
+            return None
+        return Path(self.export_dir).expanduser().resolve()
 
     @property
     def contracts_path(self) -> Path:

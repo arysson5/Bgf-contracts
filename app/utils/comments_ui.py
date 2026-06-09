@@ -129,6 +129,73 @@ def load_comments_from_file(bundle: DocumentCommentsBundle, file_path: str) -> i
     return added
 
 
+def _quick_applied_key(version_id: str) -> str:
+    return f"quick_applied_comments_{version_id}"
+
+
+def get_quick_applied_ids(version_id: str) -> set[str]:
+    raw = st.session_state.get(_quick_applied_key(version_id), [])
+    return set(raw) if isinstance(raw, (list, set)) else set()
+
+
+def mark_quick_applied(version_id: str, source_ref: str) -> None:
+    applied = get_quick_applied_ids(version_id)
+    applied.add(source_ref)
+    st.session_state[_quick_applied_key(version_id)] = list(applied)
+
+
+def apply_quick_comment_to_version(
+    version,
+    *,
+    comment_text: str,
+    anchor_text: str | None = None,
+    locations: list | None = None,
+    source_ref: str | None = None,
+) -> str:
+    """Grava um comentário sugerido diretamente no PDF/DOCX da versão (um clique)."""
+    bundle = get_comments_bundle(version.id, version.contract_id)
+    work = _ensure_work_file(bundle, version.file_path)
+
+    locs = list(locations or [])
+    if not locs and anchor_text:
+        locs = find_in_document(work, anchor_text)
+    if not locs and comment_text.strip():
+        locs = find_in_document(work, comment_text[:120])
+
+    work = add_comment_to_document(
+        work,
+        comment_text.strip(),
+        anchor_text=anchor_text,
+        locations=locs,
+        output_path=work,
+    )
+    bundle.annotated_file_path = work
+    _save_bundle(bundle)
+
+    if source_ref:
+        mark_quick_applied(version.id, source_ref)
+        try:
+            from app.utils.inline_comments_ui import mark_queue_item_applied
+
+            mark_queue_item_applied(version.id, source_ref)
+        except Exception:
+            pass
+
+    return work
+
+
+def render_annotated_download_button(
+    version,
+    *,
+    key_prefix: str = "cmt",
+    label: str = "⬇️ Baixar PDF com comentários",
+) -> None:
+    """Atalho compacto — painel completo em render_annotated_export_panel."""
+    from app.utils.export_ui import render_annotated_export_panel
+
+    render_annotated_export_panel(version, key_prefix=key_prefix, compact=True)
+
+
 def apply_comments_to_file(bundle: DocumentCommentsBundle, source_path: str) -> str:
     work = _ensure_work_file(bundle, source_path)
     to_apply = [c for c in bundle.comments if c.include_in_export and c.comment_text.strip()]
@@ -149,36 +216,39 @@ def apply_comments_to_file(bundle: DocumentCommentsBundle, source_path: str) -> 
     return work
 
 
-def verify_comments_between_versions(
-    base_version,
-    new_version,
-    contract_id: str,
-    diff_result: ContractDiffResult,
-) -> CommentsReviewResult:
-    base_bundle = get_comments_bundle(base_version.id, contract_id)
-    if not base_bundle.comments:
-        load_comments_from_file(base_bundle, base_version.file_path)
+def count_comments_in_file(file_path: str) -> int:
+    """Conta comentários/anotações no PDF ou DOCX (pré-visualização antes da análise)."""
+    try:
+        return len(extractor.extract_comments(file_path))
+    except Exception as exc:
+        logger.debug("Sem comentários em {}: {}", file_path, exc)
+        return 0
 
-    raw_comments = [
+
+def load_comments_for_version(version, contract_id: str) -> list[dict]:
+    """Extrai comentários do arquivo da versão e prepara lista para a IA."""
+    bundle = get_comments_bundle(version.id, contract_id)
+    if not bundle.comments:
+        load_comments_from_file(bundle, version.file_path)
+    bundle = get_comments_bundle(version.id, contract_id)
+    return [
         {
             "id": c.comment_id,
             "comment_text": c.comment_text,
             "referenced_text": c.anchor_text or "",
             "page": c.page_hint or 1,
         }
-        for c in base_bundle.comments
+        for c in bundle.comments
     ]
-    if not raw_comments:
-        load_comments_from_file(base_bundle, base_version.file_path)
-        raw_comments = [
-            {
-                "id": c.comment_id,
-                "comment_text": c.comment_text,
-                "referenced_text": c.anchor_text or "",
-                "page": c.page_hint or 1,
-            }
-            for c in get_comments_bundle(base_version.id, contract_id).comments
-        ]
+
+
+def verify_comments_between_versions(
+    base_version,
+    new_version,
+    contract_id: str,
+    diff_result: ContractDiffResult,
+) -> CommentsReviewResult:
+    raw_comments = load_comments_for_version(base_version, contract_id)
 
     if not raw_comments:
         return CommentsReviewResult(
@@ -204,6 +274,140 @@ def verify_comments_between_versions(
         if anchor:
             rev.locations = find_in_document(new_version.file_path, anchor)
     return result
+
+
+def render_comment_verification_results(
+    verification: CommentsReviewResult,
+    *,
+    new_version=None,
+    key_prefix: str = "cmt_ver",
+) -> None:
+    """Painel principal: cada comentário do contrato base vs atendimento na nova versão."""
+    section_title("Pedidos de mudança (comentários no contrato)")
+    if verification.total_comments == 0:
+        st.warning(
+            "Nenhum comentário encontrado no **contrato com comentários**. "
+            "Use um PDF/DOCX que tenha anotações de revisão (balões de comentário)."
+        )
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total de pedidos", verification.total_comments)
+    c2.metric("Atendidos", verification.attended)
+    c3.metric("Parciais", verification.partially)
+    c4.metric("Não atendidos", verification.not_attended)
+    st.progress(
+        verification.overall_attended_rate,
+        text=f"Taxa de atendimento: {verification.overall_attended_rate:.0%}",
+    )
+    st.info(verification.admin_summary)
+
+    not_ok = [r for r in verification.reviews if r.status != CommentStatus.ATTENDED]
+    if not_ok:
+        st.error(f"**{len(not_ok)} pedido(s)** ainda exigem atenção na versão revisada.")
+
+    if new_version:
+        applied_ids = get_quick_applied_ids(new_version.id)
+        pending_quick = [
+            r
+            for r in verification.reviews
+            if review_needs_reinforcement(r) and r.comment_id not in applied_ids
+        ]
+        if pending_quick:
+            st.markdown("**Comentar no PDF novo (1 clique)**")
+            st.caption(
+                "Aplica a sugestão da IA diretamente no arquivo revisado, "
+                "no trecho correspondente — sem precisar editar ou confirmar em fila."
+            )
+            if st.button(
+                f"✅ Comentar todos os pendentes no PDF ({len(pending_quick)})",
+                type="primary",
+                key=f"{key_prefix}_quick_all",
+            ):
+                try:
+                    with st.spinner(f"Gravando {len(pending_quick)} comentário(s)..."):
+                        for rev in pending_quick:
+                            anchor = rev.referenced_excerpt or rev.change_found
+                            apply_quick_comment_to_version(
+                                new_version,
+                                comment_text=suggest_reinforcement(rev),
+                                anchor_text=anchor,
+                                locations=rev.locations,
+                                source_ref=rev.comment_id,
+                            )
+                    st.success(f"{len(pending_quick)} comentário(s) gravado(s) no PDF.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(str(exc))
+
+        from app.utils.export_ui import get_annotated_work_path, render_annotated_export_panel
+
+        if get_annotated_work_path(new_version):
+            st.divider()
+            render_annotated_export_panel(
+                new_version,
+                key_prefix=f"{key_prefix}_export",
+                title="Salvar PDF comentado",
+            )
+
+    for rev in verification.reviews:
+        badge = _STATUS_BADGE.get(rev.status, rev.status.value)
+        icon = "✅" if rev.status == CommentStatus.ATTENDED else (
+            "⚠️" if rev.status == CommentStatus.PARTIALLY else "❌"
+        )
+        with st.expander(f"{icon} {badge} — {rev.original_comment[:90]}…", expanded=rev.status != CommentStatus.ATTENDED):
+            st.markdown(f"**Pedido:** {rev.original_comment}")
+            if rev.referenced_excerpt:
+                st.caption("Trecho referenciado no contrato anterior")
+                st.code(rev.referenced_excerpt[:800])
+            st.write(f"**Análise:** {rev.justification}")
+            if rev.change_found:
+                st.markdown("**O que mudou na nova versão:**")
+                st.code(rev.change_found[:1200])
+            if rev.suggested_response:
+                st.markdown("**Sugestão de resposta ao cliente:**")
+                st.write(rev.suggested_response)
+
+            if new_version and review_needs_reinforcement(rev):
+                applied_ids = get_quick_applied_ids(new_version.id)
+                if rev.comment_id in applied_ids:
+                    st.success("✅ Sugestão já gravada no PDF novo.")
+                else:
+                    preview = (
+                        f"Por favor, atender ao comentário anterior ainda pendente nesta versão:\n\n"
+                        f"{rev.original_comment[:500]}"
+                    )
+                    with st.expander("Prévia do comentário (texto final gerado ao clicar)", expanded=False):
+                        st.write(preview)
+                    if st.button(
+                        "✅ Comentar no PDF",
+                        type="primary",
+                        key=f"{key_prefix}_quick_{rev.comment_id}",
+                        help="Gera a sugestão da IA e grava no arquivo revisado, no trecho correspondente.",
+                    ):
+                        try:
+                            with st.spinner("Gerando sugestão e gravando no PDF..."):
+                                suggestion = suggest_reinforcement(rev)
+                                anchor = rev.referenced_excerpt or rev.change_found
+                                apply_quick_comment_to_version(
+                                    new_version,
+                                    comment_text=suggestion,
+                                    anchor_text=anchor,
+                                    locations=rev.locations,
+                                    source_ref=rev.comment_id,
+                                )
+                            st.success("Comentário gravado no PDF.")
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+
+            if new_version and rev.locations:
+                render_document_navigator(
+                    new_version.file_path,
+                    new_version.file_type,
+                    excerpt_locations=rev.locations,
+                    key_prefix=f"{key_prefix}_{rev.comment_id}",
+                )
 
 
 def render_comment_suggestions(
@@ -455,13 +659,13 @@ def render_comments_panel(
 
         work = bundle.annotated_file_path
         if work and Path(work).exists():
-            with open(work, "rb") as f:
-                st.download_button(
-                    "⬇️ Baixar contrato com comentários",
-                    f.read(),
-                    file_name=Path(work).name,
-                    key=f"{key_prefix}_dl",
-                )
+            from app.utils.export_ui import render_annotated_export_panel
+
+            render_annotated_export_panel(
+                version,
+                key_prefix=f"{key_prefix}_export",
+                title="Salvar contrato com comentários",
+            )
             if file_type == "pdf":
                 from app.utils.pdf_ui import show_pdf
 

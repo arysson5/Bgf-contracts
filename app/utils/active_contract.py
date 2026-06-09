@@ -110,6 +110,56 @@ def on_sidebar_contract_changed(contract_id: str) -> None:
         apply_active_contract(contract_id, force=True)
 
 
+def contract_identity_matches(
+    contract_name: str,
+    client_name: str,
+    contract: Contract | None,
+) -> bool:
+    """True se nome e cliente coincidem com o contrato informado."""
+    if not contract:
+        return False
+    return (
+        contract_name.strip().casefold() == contract.name.strip().casefold()
+        and client_name.strip().casefold() == contract.client_name.strip().casefold()
+    )
+
+
+def resolve_contract_for_upload(contract_name: str, client_name: str) -> tuple[str, bool]:
+    """
+    Resolve o contrato alvo do upload.
+
+    Reutiliza o contrato ativo somente se nome e cliente forem iguais.
+    Caso contrário, cria um novo contrato (proposta própria, sem herdar a anterior).
+    Retorna (contract_id, created_new).
+    """
+    name = contract_name.strip()
+    client = client_name.strip()
+    if not name or not client:
+        raise ValueError("Informe nome do contrato e do cliente.")
+
+    active = get_active_contract()
+    if active and contract_identity_matches(name, client, active):
+        return active.id, False
+
+    contract = db.create_contract(name, client)
+    st.session_state.active_contract_id = contract.id
+    st.session_state._applied_contract_id = contract.id
+    for key in (
+        "upload_version_id",
+        "active_version_id",
+        "checklist_version_id",
+        "last_matrix_initial_result",
+        "last_checklist_result",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state["upload_version_label_default"] = "Original"
+    st.session_state["upload_version_label"] = "Original"
+    from app.utils.data_cache import clear_data_cache
+
+    clear_data_cache()
+    return contract.id, True
+
+
 def clear_active_contract_context() -> None:
     """Novo contrato do zero — limpa vínculos de preenchimento."""
     st.session_state.active_contract_id = None
@@ -122,8 +172,26 @@ def clear_active_contract_context() -> None:
         "compare_new_version_id",
         "upload_contract_name",
         "upload_client_name",
+        "last_matrix_initial_result",
+        "last_checklist_result",
     ):
         st.session_state.pop(key, None)
+    st.session_state["upload_version_label_default"] = "Original"
+    st.session_state["upload_version_label"] = "Original"
+
+
+def version_option_label(version: ContractVersion) -> str:
+    """Rótulo legível para selectbox de versão (número, nome, data e arquivo)."""
+    from pathlib import Path
+
+    from app.utils.datetime_br import format_brazil_datetime
+
+    when = format_brazil_datetime(version.uploaded_at, "%d/%m/%Y")
+    fname = Path(version.file_path).name if version.file_path else ""
+    base = f"v{version.version_number} — {version.label}"
+    if fname:
+        return f"{base} ({when} · {fname})"
+    return f"{base} ({when})"
 
 
 def version_select_index(
@@ -165,10 +233,14 @@ def render_active_contract_banner(
             ver_line = (
                 f" · Versões: **{len(versions)}** "
                 f"(análise inicial → v{latest.version_number} «{latest.label}»; "
-                f"comparar → v{versions[base_i].version_number} × v{versions[new_i].version_number})"
+                f"comparar → última salva × novo arquivo ou "
+                f"v{versions[base_i].version_number} × v{versions[new_i].version_number})"
             )
         else:
-            ver_line = f" · Versão: **v{latest.version_number}** — {latest.label}"
+            ver_line = (
+                f" · Versão: **v{latest.version_number}** — {latest.label} "
+                f"(comparar → última salva × novo arquivo)"
+            )
 
     st.info(
         f"**Contrato ativo:** {contract.name} ({contract.client_name}){proposal_note}{ver_line}"

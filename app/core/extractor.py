@@ -115,9 +115,99 @@ def extract_text(file_path: str) -> tuple[str, DocumentType]:
     return text, doc_type
 
 
+# Tipos de anotação que costumam carregar revisão/comentário (Acrobat, Bluebeam, etc.)
+_COMMENT_ANNOT_NAMES = frozenset({
+    "Text",
+    "FreeText",
+    "Highlight",
+    "Underline",
+    "Squiggly",
+    "StrikeOut",
+    "Caret",
+    "Ink",
+    "Polygon",
+    "PolyLine",
+})
+# Popup repete o texto do pai; ignorar para não duplicar
+_SKIP_ANNOT_NAMES = frozenset({
+    "Popup",
+    "Link",
+    "Widget",
+    "FileAttachment",
+    "Sound",
+    "Movie",
+    "Screen",
+    "PrinterMark",
+    "TrapNet",
+    "Watermark",
+    "3D",
+})
+
+
+def _annot_type_name(annot) -> str:
+    if annot.type and len(annot.type) > 1:
+        return annot.type[1] or ""
+    return ""
+
+
+def _comment_text_from_annot(annot) -> str:
+    info = annot.info or {}
+    parts = [
+        info.get("content"),
+        info.get("subject"),
+        annot.get_text(),
+    ]
+    for raw in parts:
+        if not raw:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return ""
+
+
+def _referenced_text_from_annot(page, annot, comment_text: str) -> str:
+    """Trecho do documento ancorado à anotação (retângulo do highlight/nota)."""
+    try:
+        rect = annot.rect
+        if rect and not rect.is_empty:
+            excerpt = page.get_text("text", clip=rect).strip()
+            if excerpt:
+                return excerpt[:2000]
+    except Exception:
+        pass
+
+    # Fallback: busca por trecho citado no próprio comentário
+    needle = comment_text.replace("Por favor, ajustar para:", "").strip()
+    for search in (needle[:120], needle[:80], comment_text[:80]):
+        if len(search) < 8:
+            continue
+        try:
+            rects = page.search_for(search)
+            if rects:
+                return page.get_text("text", clip=rects[0]).strip()[:2000]
+        except Exception:
+            continue
+    return ""
+
+
+def _is_review_annotation(annot) -> bool:
+    type_name = _annot_type_name(annot)
+    if type_name in _SKIP_ANNOT_NAMES:
+        return False
+    if type_name in _COMMENT_ANNOT_NAMES:
+        return True
+    # Tipos numéricos PyMuPDF: 0 Text, 2 FreeText, 8 Highlight, 9-11 markup
+    atype = annot.type[0] if annot.type else None
+    return atype in (0, 2, 8, 9, 10, 11, 13, 15)
+
+
 def extract_comments_from_pdf(file_path: str) -> list[dict]:
     """
-    Extrai anotações Text e FreeText do PDF via pymupdf.
+    Extrai comentários de revisão do PDF via PyMuPDF.
+
+    Inclui notas (Text), caixas (FreeText) e **destaques** (Highlight) —
+    formato mais comum em PDFs revisados no Acrobat.
     """
     path = Path(file_path)
     if not path.exists():
@@ -126,48 +216,44 @@ def extract_comments_from_pdf(file_path: str) -> list[dict]:
         raise ValueError("Extração de comentários suportada apenas para PDF.")
 
     comments: list[dict] = []
+    seen: set[tuple[int, str]] = set()
     doc = fitz.open(file_path)
     try:
         for page_index, page in enumerate(doc):
             for annot in page.annots() or []:
-                if annot is None:
-                    continue
-                atype = annot.type[0] if annot.type else None
-                # 0=Text, 2=FreeText (varia por versão; incluir nomes comuns)
-                type_name = annot.type[1] if annot.type and len(annot.type) > 1 else ""
-                if atype not in (0, 2) and type_name not in ("Text", "FreeText"):
+                if annot is None or not _is_review_annotation(annot):
                     continue
 
-                info = annot.info or {}
-                comment_text = (info.get("content") or annot.get_text() or "").strip()
+                comment_text = _comment_text_from_annot(annot)
                 if not comment_text:
                     continue
 
-                referenced = ""
-                try:
-                    quad = annot.vertices
-                    if quad:
-                        rects = page.search_for(comment_text[:80]) if len(comment_text) > 3 else []
-                        if rects:
-                            referenced = page.get_text("text", clip=rects[0]).strip()
-                except Exception:
-                    pass
+                rect = annot.rect
+                dedup_key = (
+                    page_index + 1,
+                    round(rect.x0, 1),
+                    round(rect.y0, 1),
+                    round(rect.x1, 1),
+                    round(rect.y1, 1),
+                    comment_text[:120],
+                )
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
 
-                if not referenced:
-                    try:
-                        rect = annot.rect
-                        referenced = page.get_text("text", clip=rect).strip()
-                    except Exception:
-                        referenced = ""
+                info = annot.info or {}
+                referenced = _referenced_text_from_annot(page, annot, comment_text)
+                type_name = _annot_type_name(annot)
 
                 comments.append(
                     {
                         "id": str(uuid.uuid4()),
                         "page": page_index + 1,
                         "comment_text": comment_text,
-                        "referenced_text": referenced[:2000] if referenced else "",
+                        "referenced_text": referenced,
                         "author": info.get("title") or info.get("author") or "Desconhecido",
                         "date": info.get("modDate") or info.get("creationDate") or "",
+                        "annot_type": type_name,
                     }
                 )
     finally:

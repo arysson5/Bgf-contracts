@@ -15,6 +15,7 @@ from app.utils.data_cache import (
 from app.utils.theme import (
     activity_feed,
     hero_block,
+    render_page_footer,
     section_title,
     setup_page,
     stat_cards,
@@ -51,7 +52,7 @@ with c1:
             clear_active_contract_context()
         st.switch_page("pages/01_upload.py")
 with c2:
-    if st.button("Comparar / Proposta × Contrato", width="stretch"):
+    if st.button("Comparar versões", width="stretch"):
         st.switch_page("pages/02_compare.py")
 with c3:
     if st.button("Histórico", width="stretch"):
@@ -74,7 +75,4 @@ for col, title, desc in features:
 section_title("Últimas atividades")
 activity_feed(recent)
 
-st.markdown(
-    '<footer class="ca-footer">Contract Analyzer · Análise jurídica assistida por IA</footer>',
-    unsafe_allow_html=True,
-)
+render_page_footer()

@@ -14,7 +14,6 @@ from app.core.comment_suggester import (
     suggest_for_matrix_gap,
     suggest_reinforcement,
 )
-from app.core.document_annotator import add_comment_to_document
 from app.core.document_locator import find_in_document
 from app.core.comment_suggester import matrix_item_needs_comment  # noqa: F401
 from app.db import database as db
@@ -29,7 +28,6 @@ from app.models.schemas import (
     VersionRegressionResult,
 )
 from app.utils.comments_ui import (
-    _ensure_work_file,
     get_comments_bundle,
     load_comments_from_file,
 )
@@ -48,7 +46,7 @@ def _nav_task_key(version_id: str, key_prefix: str) -> str:
     return f"{key_prefix}_inline_nav_task_{version_id}"
 
 
-def _nav_pick_key(version_id: str, key_prefix: str) -> str:
+def _nav_idx_key(version_id: str, key_prefix: str) -> str:
     return f"{key_prefix}_inline_nav_idx_{version_id}"
 
 
@@ -61,6 +59,13 @@ def mark_comment_queue_for_rebuild(version_id: str, key_prefix: str = "inl") -> 
     st.session_state[_rebuild_flag_key(version_id, key_prefix)] = True
 
 
+def mark_queue_item_applied(version_id: str, source_ref: str) -> None:
+    """Marca item da fila inline como gravado (ex.: após comentário rápido na aba de verificação)."""
+    for task in _queue_store().get(version_id, []):
+        if task.get("source_ref") == source_ref:
+            task["status"] = "applied"
+
+
 def _queue_store() -> dict[str, list[dict]]:
     if _QUEUE_KEY not in st.session_state:
         st.session_state[_QUEUE_KEY] = {}
@@ -69,6 +74,12 @@ def _queue_store() -> dict[str, list[dict]]:
 
 def _pending_tasks(queue: list[dict]) -> list[dict]:
     return [t for t in queue if t.get("status") == "pending"]
+
+
+def _clamp_idx(idx: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return max(0, min(int(idx), total - 1))
 
 
 def _task_page_label(task: dict) -> str:
@@ -88,53 +99,81 @@ def _task_short_label(task: dict, index: int, total: int) -> str:
     return f"{index + 1}/{total} {prefix}{_task_page_label(task)}{preview}… [{src}]"
 
 
-def _resolve_current_task(
+def _sync_nav_state(
     pending: list[dict],
     version_id: str,
     key_prefix: str,
+    *,
+    preferred_idx: int | None = None,
 ) -> tuple[dict, int]:
-    nav_key = _nav_task_key(version_id, key_prefix)
+    """Fonte única de verdade: índice na lista pending + task_id."""
+    if not pending:
+        raise ValueError("Nenhuma sugestão pendente")
+
+    idx_key = _nav_idx_key(version_id, key_prefix)
+    task_key = _nav_task_key(version_id, key_prefix)
     by_id = {t["task_id"]: t for t in pending}
-    current_id = st.session_state.get(nav_key)
 
-    if current_id not in by_id:
-        current_id = pending[0]["task_id"]
-        st.session_state[nav_key] = current_id
+    if preferred_idx is not None:
+        idx = _clamp_idx(preferred_idx, len(pending))
+    else:
+        stored_idx = st.session_state.get(idx_key, 0)
+        idx = _clamp_idx(stored_idx, len(pending))
+        task_id = st.session_state.get(task_key)
+        if task_id in by_id:
+            idx = pending.index(by_id[task_id])
 
-    task = by_id[current_id]
-    idx = pending.index(task)
-    pick_key = _nav_pick_key(version_id, key_prefix)
-    st.session_state[pick_key] = idx
+    task = pending[idx]
+    st.session_state[idx_key] = idx
+    st.session_state[task_key] = task["task_id"]
     return task, idx
 
 
-def _set_nav_task(
+def _goto_idx(
+    pending: list[dict],
     version_id: str,
     key_prefix: str,
-    task_id: str | None,
-    *,
-    pick_index: int | None = None,
+    new_idx: int,
 ) -> None:
-    nav_key = _nav_task_key(version_id, key_prefix)
-    if task_id:
-        st.session_state[nav_key] = task_id
+    if not pending:
+        _clear_nav_state(version_id, key_prefix)
+        return
+    idx = _clamp_idx(new_idx, len(pending))
+    st.session_state[_nav_idx_key(version_id, key_prefix)] = idx
+    st.session_state[_nav_task_key(version_id, key_prefix)] = pending[idx]["task_id"]
+
+
+def _clear_nav_state(version_id: str, key_prefix: str) -> None:
+    st.session_state.pop(_nav_idx_key(version_id, key_prefix), None)
+    st.session_state.pop(_nav_task_key(version_id, key_prefix), None)
+
+
+def _after_action_navigate(
+    pending_before: list[dict],
+    current_task_id: str,
+    version_id: str,
+    key_prefix: str,
+) -> None:
+    """Após confirmar/descartar: mantém posição ou avança para o próximo pendente."""
+    queue = _queue_store().get(version_id, [])
+    pending_after = _pending_tasks(queue)
+    if not pending_after:
+        _clear_nav_state(version_id, key_prefix)
+        return
+
+    try:
+        old_idx = next(i for i, t in enumerate(pending_before) if t["task_id"] == current_task_id)
+    except StopIteration:
+        old_idx = 0
+
+    if old_idx < len(pending_after):
+        new_idx = old_idx
+    elif old_idx > 0:
+        new_idx = old_idx - 1
     else:
-        st.session_state.pop(nav_key, None)
-    if pick_index is not None:
-        st.session_state[_nav_pick_key(version_id, key_prefix)] = pick_index
+        new_idx = 0
 
-
-def _next_task_id_after_action(pending: list[dict], current_id: str) -> str | None:
-    """Próximo item pendente após confirmar/descartar o atual."""
-    ids = [t["task_id"] for t in pending]
-    if current_id not in ids:
-        return ids[0] if ids else None
-    pos = ids.index(current_id)
-    if pos + 1 < len(ids):
-        return ids[pos + 1]
-    if pos > 0:
-        return ids[pos - 1]
-    return None
+    _goto_idx(pending_after, version_id, key_prefix, new_idx)
 
 
 def _build_task(
@@ -283,26 +322,22 @@ def _apply_task_to_file(
     bundle,
 ) -> str:
     from app.models.schemas import TextLocation
+    from app.utils.comments_ui import apply_quick_comment_to_version
 
-    work = _ensure_work_file(bundle, version.file_path)
     locs = [TextLocation.model_validate(x) for x in task.get("locations") or []]
-    work = add_comment_to_document(
-        work,
-        task["comment_text"],
+    work = apply_quick_comment_to_version(
+        version,
+        comment_text=task["comment_text"],
         anchor_text=task.get("anchor_text"),
         locations=locs,
-        output_path=work,
+        source_ref=task.get("source_ref"),
     )
     bundle.annotated_file_path = work
-    from app.utils.comments_ui import _save_bundle
-
-    _save_bundle(bundle)
     return work
 
 
 def _render_comment_navigator(
     pending: list[dict],
-    task: dict,
     idx: int,
     *,
     version_id: str,
@@ -312,79 +347,56 @@ def _render_comment_navigator(
     total = len(pending)
     st.markdown("**Navegar entre sugestões**")
 
-    pick_key = _nav_pick_key(version_id, key_prefix)
-
     c_prev, c_jump, c_next, c_pos = st.columns([1, 3, 1, 1])
     with c_prev:
         if st.button(
             "◀ Anterior",
             key=f"{key_prefix}_nav_prev_{version_id}",
             disabled=idx <= 0,
-            width="stretch",
+            use_container_width=True,
         ):
-            new_idx = idx - 1
-            _set_nav_task(
-                version_id,
-                key_prefix,
-                pending[new_idx]["task_id"],
-                pick_index=new_idx,
-            )
+            _goto_idx(pending, version_id, key_prefix, idx - 1)
             st.rerun()
     with c_next:
         if st.button(
             "Próximo ▶",
             key=f"{key_prefix}_nav_next_{version_id}",
             disabled=idx >= total - 1,
-            width="stretch",
+            use_container_width=True,
         ):
-            new_idx = idx + 1
-            _set_nav_task(
-                version_id,
-                key_prefix,
-                pending[new_idx]["task_id"],
-                pick_index=new_idx,
-            )
+            _goto_idx(pending, version_id, key_prefix, idx + 1)
             st.rerun()
     with c_pos:
         st.caption(f"**{idx + 1}** / {total}")
 
     with c_jump:
         labels = [_task_short_label(t, i, total) for i, t in enumerate(pending)]
-        st.selectbox(
+        # Sem key no selectbox: índice vem só do session_state (evita conflito com botões)
+        picked = st.selectbox(
             "Ir diretamente para",
-            range(total),
+            options=list(range(total)),
+            index=idx,
             format_func=lambda i: labels[i],
             label_visibility="collapsed",
-            key=pick_key,
+            key=f"{key_prefix}_nav_sel_{version_id}_{idx}",
         )
-        picked = st.session_state[pick_key]
         if picked != idx:
-            _set_nav_task(
-                version_id,
-                key_prefix,
-                pending[picked]["task_id"],
-                pick_index=picked,
-            )
+            _goto_idx(pending, version_id, key_prefix, picked)
             st.rerun()
 
     with st.expander(f"Lista rápida ({total} pendentes)", expanded=total <= 6):
         cols = st.columns(min(total, 4))
         for i, t in enumerate(pending):
             col = cols[i % len(cols)]
-            active = t["task_id"] == task["task_id"]
+            active = i == idx
             label = f"{'● ' if active else ''}{i + 1}"
             if col.button(
                 label,
                 key=f"{key_prefix}_nav_chip_{version_id}_{t['task_id']}",
                 type="primary" if active else "secondary",
-                width="stretch",
+                use_container_width=True,
             ):
-                _set_nav_task(
-                    version_id,
-                    key_prefix,
-                    t["task_id"],
-                    pick_index=i,
-                )
+                _goto_idx(pending, version_id, key_prefix, i)
                 st.rerun()
 
 
@@ -401,8 +413,8 @@ def render_inline_comments_workspace(
 ) -> None:
     section_title("Comentários no documento (inline)")
     st.caption(
-        "Cada sugestão abre o trecho marcado no PDF/DOCX. Use **Anterior / Próximo** ou a lista "
-        "para navegar. **Confirmar** grava o comentário no arquivo no padrão dos PDFs de referência BGF."
+        "Cada sugestão abre o trecho marcado no PDF/DOCX. **Comentar no PDF** grava com um clique "
+        "(padrão BGF). Use Anterior / Próximo para revisar item a item."
     )
 
     bundle = get_comments_bundle(version.id, version.contract_id)
@@ -421,7 +433,7 @@ def render_inline_comments_workspace(
     with col_c:
         if st.button("🗑️ Limpar fila", key=f"{key_prefix}_clr"):
             _queue_store()[vid] = []
-            _set_nav_task(vid, key_prefix, None)
+            _clear_nav_state(vid, key_prefix)
             st.rerun()
 
     rebuild_flag = st.session_state.pop(_rebuild_flag_key(vid, key_prefix), False)
@@ -447,9 +459,9 @@ def render_inline_comments_workspace(
             new_tasks.extend(_tasks_from_verification(verification, version.file_path))
         _enqueue_tasks(vid, new_tasks, replace=do_rebuild)
         if do_rebuild or queue_missing:
-            pending_new = [t for t in new_tasks if t.get("status") == "pending"]
-            if pending_new:
-                _set_nav_task(vid, key_prefix, pending_new[0]["task_id"], pick_index=0)
+            fresh_pending = _pending_tasks(_queue_store().get(vid, []))
+            if fresh_pending:
+                _goto_idx(fresh_pending, vid, key_prefix, 0)
 
     queue = _queue_store().get(vid, [])
     pending = _pending_tasks(queue)
@@ -470,21 +482,41 @@ def render_inline_comments_workspace(
             f"Fila: **{len(pending)}** pendente(s) · **{applied}** gravado(s) · **{discarded}** descartado(s)"
         )
 
+    if pending:
+        if st.button(
+            f"✅ Comentar todos no PDF ({len(pending)})",
+            type="primary",
+            key=f"{key_prefix}_apply_all",
+        ):
+            try:
+                with st.spinner(f"Gravando {len(pending)} comentário(s)..."):
+                    for task in list(pending):
+                        _apply_task_to_file(version, task, bundle)
+                        task["status"] = "applied"
+                _clear_nav_state(vid, key_prefix)
+                st.success(f"{len(pending)} comentário(s) gravado(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
     if not pending:
         st.success("Nenhuma sugestão pendente na fila.")
-        work = bundle.annotated_file_path
-        if work and Path(work).exists():
-            with open(work, "rb") as f:
-                st.download_button(
-                    "⬇️ Baixar documento revisado",
-                    f.read(),
-                    file_name=Path(work).name,
-                    key=f"{key_prefix}_dl",
-                )
+        from app.utils.export_ui import render_annotated_export_panel
+
+        render_annotated_export_panel(
+            version,
+            key_prefix=f"{key_prefix}_export",
+            title="Salvar documento comentado",
+        )
         return
 
-    task, idx = _resolve_current_task(pending, vid, key_prefix)
-    _render_comment_navigator(pending, task, idx, version_id=vid, key_prefix=key_prefix)
+    try:
+        task, idx = _sync_nav_state(pending, vid, key_prefix)
+    except ValueError:
+        st.success("Nenhuma sugestão pendente na fila.")
+        return
+
+    _render_comment_navigator(pending, idx, version_id=vid, key_prefix=key_prefix)
 
     st.progress((idx + 1) / len(pending), text=f"Sugestão {idx + 1} de {len(pending)}")
 
@@ -521,43 +553,55 @@ def render_inline_comments_workspace(
     with col_act:
         if task.get("categoria"):
             st.caption(f"Categoria: **{task['categoria']}**")
+
+        txt_key = f"{key_prefix}_txt_{task['task_id']}"
+        if txt_key not in st.session_state:
+            st.session_state[txt_key] = task["comment_text"]
+
+        anc_key = f"{key_prefix}_anc_{task['task_id']}"
+        if anc_key not in st.session_state:
+            st.session_state[anc_key] = task.get("anchor_text") or ""
+
         edited = st.text_area(
             "Texto do comentário",
-            task["comment_text"],
             height=160,
-            key=f"{key_prefix}_txt_{task['task_id']}",
+            key=txt_key,
         )
         manual_anchor = st.text_input(
             "Ajustar trecho âncora (opcional)",
-            value=task.get("anchor_text") or "",
-            key=f"{key_prefix}_anc_{task['task_id']}",
+            key=anc_key,
         )
 
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("✅ Confirmar", type="primary", key=f"{key_prefix}_ok_{task['task_id']}"):
-                task["comment_text"] = edited
-                if manual_anchor.strip():
-                    task["anchor_text"] = manual_anchor.strip()
-                    task["locations"] = [
-                        loc.model_dump()
-                        for loc in find_in_document(file_path, task["anchor_text"])
-                    ]
-                try:
-                    _apply_task_to_file(version, task, bundle)
-                    task["status"] = "applied"
-                    next_id = _next_task_id_after_action(pending, task["task_id"])
-                    _set_nav_task(vid, key_prefix, next_id)
-                    st.success("Comentário gravado no documento.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
-        with c2:
-            if st.button("Descartar", key=f"{key_prefix}_no_{task['task_id']}"):
-                task["status"] = "discarded"
-                next_id = _next_task_id_after_action(pending, task["task_id"])
-                _set_nav_task(vid, key_prefix, next_id)
+        if st.button(
+            "✅ Comentar no PDF",
+            type="primary",
+            key=f"{key_prefix}_ok_{task['task_id']}",
+            use_container_width=True,
+        ):
+            task["comment_text"] = edited
+            if manual_anchor.strip():
+                task["anchor_text"] = manual_anchor.strip()
+                task["locations"] = [
+                    loc.model_dump()
+                    for loc in find_in_document(file_path, task["anchor_text"])
+                ]
+            try:
+                _apply_task_to_file(version, task, bundle)
+                task["status"] = "applied"
+                _after_action_navigate(pending, task["task_id"], vid, key_prefix)
+                st.session_state.pop(txt_key, None)
+                st.session_state.pop(anc_key, None)
+                st.success("Comentário gravado no documento.")
                 st.rerun()
+            except Exception as exc:
+                st.error(str(exc))
+
+        if st.button("Descartar sugestão", key=f"{key_prefix}_no_{task['task_id']}"):
+            task["status"] = "discarded"
+            _after_action_navigate(pending, task["task_id"], vid, key_prefix)
+            st.session_state.pop(txt_key, None)
+            st.session_state.pop(anc_key, None)
+            st.rerun()
 
     st.divider()
     st.markdown("**Marcar trecho manualmente**")
@@ -580,3 +624,13 @@ def render_inline_comments_workspace(
     if st.button("Salvar fila no histórico", key=f"{key_prefix}_save_db"):
         db.save_analysis_result(version.id, "document_comments", bundle)
         st.success("Salvo.")
+
+    from app.utils.export_ui import get_annotated_work_path, render_annotated_export_panel
+
+    if get_annotated_work_path(version):
+        st.divider()
+        render_annotated_export_panel(
+            version,
+            key_prefix=f"{key_prefix}_export",
+            title="Salvar documento comentado",
+        )

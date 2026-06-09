@@ -23,28 +23,28 @@ from app.utils.inline_comments_ui import (
 from app.utils.matrix_ui import render_matrix_editor
 from app.utils.settings import get_settings
 from app.utils.data_cache import clear_data_cache
-from app.utils.theme import page_header, section_title, setup_page
-from app.utils.active_contract import render_active_contract_banner
+from app.utils.theme import page_header, render_page_footer, section_title, setup_page
+from app.utils.active_contract import (
+    contract_identity_matches,
+    get_active_contract,
+    render_active_contract_banner,
+    resolve_contract_for_upload,
+)
 from app.utils.ui import save_uploaded_file
 
 setup_page("Upload & Checklist", page_icon="📤")
 settings = get_settings()
 
+page_header(
+    "Upload & Análise inicial",
+    "Cada cliente/contrato tem proposta própria (opcional). Sem proposta, a análise usa só a matriz no contrato.",
+)
+
 render_active_contract_banner(context="upload")
 
 RISK_ICON = {ChangeRisk.HIGH: "🔴", ChangeRisk.MEDIUM: "🟡", ChangeRisk.LOW: "🟢"}
 
-page_header(
-    "Upload & Análise inicial",
-    "Envie o contrato, vincule a proposta comercial (contexto persistente) e analise com a matriz.",
-)
-
 section_title("1. Upload do contrato")
-if st.session_state.get("active_contract_id"):
-    st.caption(
-        "Com **contrato ativo** na sidebar, novas versões são vinculadas a ele; "
-        "a análise inicial usa a última versão salva."
-    )
 uploaded = st.file_uploader("Arquivo (PDF ou DOCX)", type=["pdf", "docx"])
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -64,6 +64,24 @@ with col3:
         )
     version_label = st.text_input("Label da versão", key="upload_version_label")
 
+active_rec = get_active_contract()
+if active_rec and contract_name and client_name:
+    if not contract_identity_matches(contract_name, client_name, active_rec):
+        st.info(
+            "Nome ou cliente **diferentes** do contrato ativo na sidebar — "
+            "ao salvar, será criado um **novo contrato** (proposta própria, sem herdar a anterior)."
+        )
+    else:
+        st.caption(
+            "Mesmo contrato ativo: novas versões serão vinculadas a ele; "
+            "a proposta cadastrada na seção 1b vale só para este contrato."
+        )
+elif st.session_state.get("active_contract_id"):
+    st.caption(
+        "Preencha nome do contrato e do cliente. Versões iguais ao contrato ativo "
+        "são vinculadas a ele; nomes diferentes criam um novo contrato."
+    )
+
 version_id = st.session_state.get("upload_version_id")
 
 if uploaded and contract_name and client_name:
@@ -73,20 +91,22 @@ if uploaded and contract_name and client_name:
                 path = save_uploaded_file(uploaded, settings.contracts_path)
                 text, doc_type = extractor.extract_text(path)
 
-            if st.session_state.active_contract_id:
-                contract_id = st.session_state.active_contract_id
-            else:
-                contract = db.create_contract(contract_name, client_name)
-                contract_id = contract.id
-                st.session_state.active_contract_id = contract_id
+            contract_id, created_new = resolve_contract_for_upload(contract_name, client_name)
 
             version = db.add_version(
                 contract_id, version_label, path, doc_type, text
             )
+            clear_data_cache()
             st.session_state.active_version_id = version.id
             st.session_state.upload_version_id = version.id
             version_id = version.id
-            st.success(f"Versão '{version_label}' salva com sucesso.")
+            if created_new:
+                st.success(
+                    f"Novo contrato **{contract_name}** ({client_name}) criado. "
+                    f"Versão '{version_label}' salva. Cadastre a proposta na seção 1b (opcional)."
+                )
+            else:
+                st.success(f"Versão '{version_label}' salva com sucesso.")
             with st.expander("Preview do texto extraído"):
                 st.text(text[:500] + ("..." if len(text) > 500 else ""))
         except ValueError as exc:
@@ -111,9 +131,10 @@ elif st.session_state.get("active_contract_id"):
     )
 
 # --- Proposta comercial (persistente no contrato) ---
-section_title("1b. Proposta comercial (referência do cliente)")
+section_title("1b. Proposta comercial (opcional)")
 st.caption(
-    "A proposta fica vinculada ao contrato e é usada em todas as análises e comparações de versões."
+    "A proposta fica vinculada **somente a este contrato**. "
+    "Se não enviar proposta, a análise inicial usará **apenas a matriz** no texto do contrato."
 )
 proposal_contract_id = st.session_state.get("active_contract_id")
 if not proposal_contract_id and version_id:
@@ -123,7 +144,8 @@ if not proposal_contract_id and version_id:
 
 if proposal_contract_id:
     contract_rec = db.get_contract(proposal_contract_id)
-    if contract_rec and db.contract_has_proposal(contract_rec):
+    has_proposal = contract_rec and db.contract_has_proposal(contract_rec)
+    if has_proposal:
         st.success(
             f"Proposta cadastrada: **{contract_rec.proposal_label}** "
             f"({len(contract_rec.proposal_extracted_text):,} caracteres extraídos)"
@@ -134,20 +156,25 @@ if proposal_contract_id:
                     "⬇️ Baixar proposta",
                     pf.read(),
                     file_name=Path(contract_rec.proposal_file_path).name,
-                    key="dl_proposal",
+                    key=f"dl_proposal_{proposal_contract_id}",
                 )
+    else:
+        st.info(
+            "Nenhuma proposta para este contrato — a análise usará só a matriz. "
+            "Envie abaixo se quiser comparar contrato × proposta."
+        )
 
     prop_file = st.file_uploader(
-        "Atualizar proposta (PDF ou DOCX)",
+        "Enviar proposta (PDF ou DOCX)" if not has_proposal else "Atualizar proposta (PDF ou DOCX)",
         type=["pdf", "docx"],
-        key="upload_proposal_file",
+        key=f"upload_proposal_file_{proposal_contract_id}",
     )
     prop_label = st.text_input(
         "Label da proposta",
-        value=contract_rec.proposal_label if contract_rec else "Proposta comercial",
-        key="upload_proposal_label",
+        value=contract_rec.proposal_label if contract_rec and contract_rec.proposal_label else "Proposta comercial",
+        key=f"upload_proposal_label_{proposal_contract_id}",
     )
-    if prop_file and st.button("Salvar proposta no contrato", key="save_proposal"):
+    if prop_file and st.button("Salvar proposta no contrato", key=f"save_proposal_{proposal_contract_id}"):
         try:
             with st.spinner("Extraindo proposta..."):
                 ppath = save_uploaded_file(prop_file, settings.contracts_path)
@@ -197,7 +224,7 @@ else:
 
     if template_choice == "Criar novo":
         new_template_name = st.text_input("Nome do novo template")
-        st.subheader("Requisitos")
+        section_title("Requisitos")
         if "new_requirements" not in st.session_state:
             st.session_state.new_requirements = [
                 {"Requisito": "Cláusula de confidencialidade", "Obrigatório": True},
@@ -258,12 +285,15 @@ if st.button("Analisar contrato", type="primary", disabled=not can_analyze):
     ver = db.get_version(version_id)
     try:
         contract_rec = db.get_contract(ver.contract_id)
-        proposal_text = (contract_rec.proposal_extracted_text or "") if contract_rec else ""
-        proposal_label = (contract_rec.proposal_label or "Proposta comercial") if contract_rec else "Proposta comercial"
+        proposal_text = ""
+        proposal_label = "Proposta comercial"
+        if contract_rec and db.contract_has_proposal(contract_rec):
+            proposal_text = contract_rec.proposal_extracted_text or ""
+            proposal_label = contract_rec.proposal_label or "Proposta comercial"
         if use_matrix and not proposal_text.strip():
-            st.warning(
-                "Proposta não cadastrada — a análise usará só o contrato. "
-                "Recomendado: salve a proposta na seção 1b antes de analisar."
+            st.info(
+                "Sem proposta cadastrada para este contrato — análise **somente com a matriz** "
+                "(modo lote, sem comparação com proposta)."
             )
         if use_matrix:
             n_items = len(matrix_items)
@@ -353,7 +383,7 @@ matrix_result: ContractMatrixInitialResult | None = st.session_state.get(
     "last_matrix_initial_result"
 )
 if matrix_result:
-    st.subheader("Resultado — parâmetros de verificação")
+    section_title("Resultado — parâmetros de verificação")
     st.info(matrix_result.executive_summary)
     if matrix_result.proposal_used:
         mode = matrix_result.analysis_mode or "com proposta"
@@ -425,7 +455,7 @@ if matrix_result:
 # --- Resultados: checklist ---
 result: ContractChecklistResult | None = st.session_state.get("last_checklist_result")
 if result:
-    st.subheader("Resultado — requisitos mínimos")
+    section_title("Resultado — requisitos mínimos")
     st.metric(
         "Score geral",
         f"{result.requirements_met}/{result.total_requirements} requisitos atendidos",
@@ -483,3 +513,5 @@ if version_id and not matrix_result and not result:
     ver_doc = db.get_version(version_id)
     if ver_doc:
         render_inline_comments_workspace(ver_doc, key_prefix="upload_only")
+
+render_page_footer()
