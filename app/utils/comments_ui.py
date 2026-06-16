@@ -283,7 +283,6 @@ def render_comment_verification_results(
     key_prefix: str = "cmt_ver",
 ) -> None:
     """Painel principal: cada comentário do contrato base vs atendimento na nova versão."""
-    section_title("Pedidos de mudança (comentários no contrato)")
     if verification.total_comments == 0:
         st.warning(
             "Nenhum comentário encontrado no **contrato com comentários**. "
@@ -291,16 +290,14 @@ def render_comment_verification_results(
         )
         return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total de pedidos", verification.total_comments)
-    c2.metric("Atendidos", verification.attended)
-    c3.metric("Parciais", verification.partially)
-    c4.metric("Não atendidos", verification.not_attended)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Atendidos", f"{verification.attended}/{verification.total_comments}")
+    c2.metric("Parciais", verification.partially)
+    c3.metric("Não atendidos", verification.not_attended)
     st.progress(
         verification.overall_attended_rate,
-        text=f"Taxa de atendimento: {verification.overall_attended_rate:.0%}",
+        text=f"Atendimento: {verification.overall_attended_rate:.0%}",
     )
-    st.info(verification.admin_summary)
 
     not_ok = [r for r in verification.reviews if r.status != CommentStatus.ATTENDED]
     if not_ok:

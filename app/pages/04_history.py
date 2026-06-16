@@ -26,18 +26,9 @@ from app.utils.pdf_ui import show_pdf
 from app.utils.theme import page_header, render_page_footer, section_title, setup_page
 from app.utils.ui import render_contract_selector
 
-setup_page("Histórico de Análises", page_icon="📚")
+setup_page("Histórico")
 
-page_header("Histórico de Análises", "Consulte e recarregue análises anteriores por contrato.")
-
-section_title("Filtros e seleção")
-contracts = db.get_contracts()
-if not contracts:
-    st.info("Nenhum contrato cadastrado.")
-    st.stop()
-
-clients = sorted({c.client_name for c in contracts})
-filter_client = st.selectbox("Filtrar por cliente", ["Todos"] + clients)
+page_header("Histórico", "Análises salvas por contrato.")
 
 contract_id = render_contract_selector("history_contract")
 if not contract_id:

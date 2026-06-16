@@ -221,27 +221,15 @@ def render_active_contract_banner(
     versions = get_active_versions()
     proposal_note = ""
     if db.contract_has_proposal(contract):
-        proposal_note = f" · Proposta: **{contract.proposal_label}**"
+        proposal_note = f" · {contract.proposal_label}"
     elif context == "upload":
-        proposal_note = " · ⚠️ Sem proposta na seção 1b"
+        proposal_note = " · sem proposta"
 
     ver_line = ""
     if show_versions and versions:
         latest = versions[-1]
-        base_i, new_i = _default_version_indices(len(versions))
-        if len(versions) >= 2:
-            ver_line = (
-                f" · Versões: **{len(versions)}** "
-                f"(análise inicial → v{latest.version_number} «{latest.label}»; "
-                f"comparar → última salva × novo arquivo ou "
-                f"v{versions[base_i].version_number} × v{versions[new_i].version_number})"
-            )
-        else:
-            ver_line = (
-                f" · Versão: **v{latest.version_number}** — {latest.label} "
-                f"(comparar → última salva × novo arquivo)"
-            )
+        ver_line = f" · v{latest.version_number} — {latest.label} ({len(versions)} versões)"
 
-    st.info(
-        f"**Contrato ativo:** {contract.name} ({contract.client_name}){proposal_note}{ver_line}"
+    st.caption(
+        f"**Ativo:** {contract.name} ({contract.client_name}){proposal_note}{ver_line}"
     )

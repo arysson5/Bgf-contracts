@@ -21,7 +21,7 @@ from app.utils.theme import (
     stat_cards,
 )
 
-setup_page("Contract Analyzer", page_icon="📄")
+setup_page("Contract Analyzer")
 
 contracts = cached_contracts()
 total_contracts = len(contracts)
@@ -61,9 +61,9 @@ with c3:
 section_title("Módulos do sistema")
 f1, f2, f3 = st.columns(3)
 features = [
-    (f1, "Análise inicial", "Matriz ou checklist + comentários de revisão no PDF/DOCX."),
-    (f2, "Comparação", "Diff entre versões com verificação de comentários atendidos."),
-    (f3, "Histórico", "Consulte análises e listas de comentários anteriores."),
+    (f1, "Análise inicial", "Matriz de parâmetros e proposta × contrato com IA."),
+    (f2, "Comparação", "Comentários atendidos e alterações entre versões."),
+    (f3, "Histórico", "Análises e versões anteriores por contrato."),
 ]
 for col, title, desc in features:
     with col:

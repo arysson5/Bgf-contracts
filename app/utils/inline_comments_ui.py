@@ -16,7 +16,6 @@ from app.core.comment_suggester import (
 )
 from app.core.document_locator import find_in_document
 from app.core.comment_suggester import matrix_item_needs_comment  # noqa: F401
-from app.db import database as db
 from app.models.schemas import (
     CommentReview,
     CommentStatus,
@@ -27,10 +26,7 @@ from app.models.schemas import (
     VersionRegressionAlert,
     VersionRegressionResult,
 )
-from app.utils.comments_ui import (
-    get_comments_bundle,
-    load_comments_from_file,
-)
+from app.utils.comments_ui import get_comments_bundle
 from app.utils.document_ui import render_focused_excerpt
 from app.utils.theme import section_title
 
@@ -411,30 +407,15 @@ def render_inline_comments_workspace(
     key_prefix: str = "inl",
     rebuild_queue: bool = False,
 ) -> None:
-    section_title("Comentários no documento (inline)")
+    section_title("Comentar no PDF")
     st.caption(
-        "Cada sugestão abre o trecho marcado no PDF/DOCX. **Comentar no PDF** grava com um clique "
-        "(padrão BGF). Use Anterior / Próximo para revisar item a item."
+        "Sugestões geradas a partir da análise. Revise trecho a trecho e grave com **Comentar no PDF**."
     )
 
     bundle = get_comments_bundle(version.id, version.contract_id)
     file_path = bundle.annotated_file_path or version.file_path
     file_type = version.file_type
     vid = version.id
-
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        if st.button("📎 Importar comentários do arquivo", key=f"{key_prefix}_imp"):
-            load_comments_from_file(bundle, version.file_path)
-            st.rerun()
-    with col_b:
-        if st.button("🔄 Gerar fila de sugestões", key=f"{key_prefix}_gen"):
-            rebuild_queue = True
-    with col_c:
-        if st.button("🗑️ Limpar fila", key=f"{key_prefix}_clr"):
-            _queue_store()[vid] = []
-            _clear_nav_state(vid, key_prefix)
-            st.rerun()
 
     rebuild_flag = st.session_state.pop(_rebuild_flag_key(vid, key_prefix), False)
     do_rebuild = rebuild_queue or rebuild_flag
@@ -467,15 +448,6 @@ def render_inline_comments_workspace(
     pending = _pending_tasks(queue)
     applied = sum(1 for t in queue if t.get("status") == "applied")
     discarded = sum(1 for t in queue if t.get("status") == "discarded")
-
-    if regression and regression.alerts:
-        st.warning(regression.executive_summary)
-        with st.expander(f"Alertas de regressão ({len(regression.alerts)})", expanded=False):
-            for alert in regression.alerts:
-                st.write(f"**{alert.title}** — {alert.description}")
-
-    if verification and verification.reviews:
-        st.info(verification.admin_summary)
 
     if queue:
         st.caption(
@@ -602,28 +574,6 @@ def render_inline_comments_workspace(
             st.session_state.pop(txt_key, None)
             st.session_state.pop(anc_key, None)
             st.rerun()
-
-    st.divider()
-    st.markdown("**Marcar trecho manualmente**")
-    manual_text = st.text_area("Comentário", key=f"{key_prefix}_manual_txt", height=70)
-    manual_anchor2 = st.text_input("Trecho do contrato", key=f"{key_prefix}_manual_anc")
-    if st.button("Adicionar à fila", key=f"{key_prefix}_manual_add") and manual_text.strip():
-        _enqueue_tasks(
-            vid,
-            [
-                _build_task(
-                    comment_text=manual_text,
-                    anchor_text=manual_anchor2 or None,
-                    source=DocumentCommentSource.MANUAL,
-                    file_path=version.file_path,
-                )
-            ],
-        )
-        st.rerun()
-
-    if st.button("Salvar fila no histórico", key=f"{key_prefix}_save_db"):
-        db.save_analysis_result(version.id, "document_comments", bundle)
-        st.success("Salvo.")
 
     from app.utils.export_ui import get_annotated_work_path, render_annotated_export_panel
 

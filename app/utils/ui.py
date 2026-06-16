@@ -51,6 +51,43 @@ def _unique_sorted_clients(contracts) -> list[str]:
     return sorted(names, key=str.lower)
 
 
+@st.cache_data(ttl=20, show_spinner=False)
+def _version_counts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for c in cached_contracts():
+        counts[c.id] = len(db.get_versions(c.id))
+    return counts
+
+
+def _contract_label(c, *, show_client: bool = True) -> str:
+    n_ver = _version_counts().get(c.id, 0)
+    ver_tag = f"{n_ver}v" if n_ver else "0v"
+    if show_client:
+        return f"{c.name} · {c.client_name} ({ver_tag})"
+    return f"{c.name} ({ver_tag})"
+
+
+def _filter_contracts(
+    contracts,
+    *,
+    client: str | None = None,
+    search_q: str = "",
+) -> list:
+    filtered = list(contracts)
+    if client and client != "— Todos —":
+        filtered = [c for c in filtered if c.client_name.strip() == client]
+    if search_q.strip():
+        q = search_q.strip().lower()
+        filtered = [
+            c
+            for c in filtered
+            if q in c.name.lower()
+            or q in (c.client_name or "").lower()
+            or q in c.id.lower()
+        ]
+    return filtered
+
+
 def render_contract_browse_selector(
     key_prefix: str = "browse",
     *,
@@ -58,16 +95,15 @@ def render_contract_browse_selector(
     show_search: bool = True,
 ) -> str | None:
     """
-    Seleciona contrato salvo por cliente e nome do contrato.
-    Usado na comparação de versões já cadastradas.
+    Seleciona contrato salvo por cliente, busca e nome.
     """
     contracts = cached_contracts()
     if not contracts:
-        st.info("Nenhum contrato cadastrado. Faça upload na página **Upload & Análise inicial**.")
+        st.info("Nenhum contrato cadastrado. Comece em **Upload & Análise inicial**.")
         return None
 
     clients = _unique_sorted_clients(contracts)
-    client_options = ["— Todos os clientes —", *clients]
+    client_options = ["— Todos —", *clients]
 
     active = db.get_contract(st.session_state.active_contract_id) if st.session_state.get(
         "active_contract_id"
@@ -76,7 +112,7 @@ def render_contract_browse_selector(
     if active and active.client_name.strip() in clients:
         default_client_idx = client_options.index(active.client_name.strip())
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns([1, 2])
     with c1:
         selected_client = st.selectbox(
             "Cliente",
@@ -88,34 +124,25 @@ def render_contract_browse_selector(
         search_q = ""
         if show_search:
             search_q = st.text_input(
-                "Buscar",
+                "Buscar contrato",
                 key=f"{key_prefix}_search",
-                placeholder="Nome do contrato ou cliente…",
-                label_visibility="collapsed",
+                placeholder="Nome, cliente ou ID…",
             )
 
-    if selected_client == "— Todos os clientes —":
-        filtered = list(contracts)
-    else:
-        filtered = [c for c in contracts if c.client_name.strip() == selected_client]
-
-    if search_q.strip():
-        q = search_q.strip().lower()
-        filtered = [
-            c
-            for c in filtered
-            if q in c.name.lower() or q in (c.client_name or "").lower()
-        ]
+    filtered = _filter_contracts(
+        contracts,
+        client=selected_client,
+        search_q=search_q,
+    )
 
     if not filtered:
-        st.warning("Nenhum contrato encontrado com os filtros atuais.")
+        st.warning("Nenhum contrato encontrado. Ajuste os filtros.")
         return None
 
-    if selected_client == "— Todos os clientes —":
-        contract_labels = [f"{c.name} ({c.client_name})" for c in filtered]
-    else:
-        contract_labels = [c.name for c in filtered]
-
+    show_client_in_label = selected_client == "— Todos —"
+    contract_labels = [
+        _contract_label(c, show_client=show_client_in_label) for c in filtered
+    ]
     label_to_id = {lbl: filtered[i].id for i, lbl in enumerate(contract_labels)}
 
     default_contract_idx = 0
@@ -127,7 +154,7 @@ def render_contract_browse_selector(
 
     contract_id = label_to_id[
         st.selectbox(
-            "Nome do contrato",
+            "Contrato",
             contract_labels,
             index=default_contract_idx,
             key=f"{key_prefix}_contract",
@@ -139,30 +166,19 @@ def render_contract_browse_selector(
 
         on_sidebar_contract_changed(contract_id)
 
+    rec = db.get_contract(contract_id)
+    if rec:
+        n_ver = _version_counts().get(contract_id, 0)
+        has_prop = db.contract_has_proposal(rec)
+        prop_hint = "com proposta" if has_prop else "sem proposta"
+        st.caption(f"**{rec.name}** — {rec.client_name} · {n_ver} versão(ões) · {prop_hint}")
+
     return contract_id
 
 
 def render_contract_selector(key: str = "contract_select") -> str | None:
-    contracts = cached_contracts()
-    if not contracts:
-        st.info("Nenhum contrato cadastrado. Faça upload na página de Checklist.")
-        return None
-    options = {
-        f"{c.name} ({c.client_name}) · {c.id[:6]}": c.id for c in contracts
-    }
-    labels = list(options.keys())
-    default_idx = 0
-    if st.session_state.active_contract_id:
-        for i, label in enumerate(labels):
-            if options[label] == st.session_state.active_contract_id:
-                default_idx = i
-                break
-    selected_label = st.selectbox("Contrato", labels, index=default_idx, key=key)
-    contract_id = options[selected_label]
-    from app.utils.active_contract import on_sidebar_contract_changed
-
-    on_sidebar_contract_changed(contract_id)
-    return contract_id
+    """Atalho unificado — mesma experiência de busca em todas as páginas."""
+    return render_contract_browse_selector(key, sync_active=True)
 
 
 def save_uploaded_file(uploaded_file, contracts_dir) -> str:
@@ -199,14 +215,14 @@ def render_compare_version_pair(
     c1, c2 = st.columns(2)
     with c1:
         bl = st.selectbox(
-            "Com comentários (pedidos de mudança)",
+            "Com comentários",
             labels,
             base_idx,
             key=base_key,
         )
     with c2:
         nl = st.selectbox(
-            "Revisado (nova versão do cliente)",
+            "Revisado",
             labels,
             new_idx,
             key=new_key,

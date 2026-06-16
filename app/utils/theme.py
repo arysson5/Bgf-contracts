@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 
 from app.db import database as db  # noqa: F401 — usado na sidebar
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_APP_ICON_ICO = _PROJECT_ROOT / "aplicativo.ico"
+_APP_FAVICON_PNG = _PROJECT_ROOT / ".streamlit" / "favicon.png"
+
+
+def get_app_icon() -> str:
+    """Caminho do ícone do app (favicon e sidebar). Gera PNG a partir do .ico se necessário."""
+    if _APP_ICON_ICO.is_file():
+        try:
+            if (
+                not _APP_FAVICON_PNG.is_file()
+                or _APP_FAVICON_PNG.stat().st_mtime < _APP_ICON_ICO.stat().st_mtime
+            ):
+                from PIL import Image
+
+                _APP_FAVICON_PNG.parent.mkdir(parents=True, exist_ok=True)
+                Image.open(_APP_ICON_ICO).save(_APP_FAVICON_PNG)
+        except Exception:
+            return str(_APP_ICON_ICO)
+        return str(_APP_FAVICON_PNG)
+    if _APP_FAVICON_PNG.is_file():
+        return str(_APP_FAVICON_PNG)
+    return "📄"
 from app.utils.data_cache import cached_contracts
 from app.utils.datetime_br import format_brazil_datetime
 from app.utils.active_contract import ensure_active_contract_applied, on_sidebar_contract_changed
@@ -391,12 +417,16 @@ def inject_corporate_theme() -> None:
 def setup_page(
     title: str,
     *,
-    page_icon: str = "📄",
+    page_icon: str | None = None,
     layout: str = "wide",
     with_sidebar: bool = True,
 ) -> None:
     """Configura página Streamlit com tema e sidebar padronizados."""
-    st.set_page_config(page_title=title, page_icon=page_icon, layout=layout)
+    st.set_page_config(
+        page_title=title,
+        page_icon=page_icon if page_icon is not None else get_app_icon(),
+        layout=layout,
+    )
     init_session_state()
     db.init_db()
     inject_corporate_theme()
@@ -470,14 +500,26 @@ def activity_feed(records: list) -> None:
 def render_app_sidebar() -> None:
     """Sidebar corporativa compartilhada."""
     with st.sidebar:
+        icon = get_app_icon()
+        if icon != "📄":
+            st.image(icon, width=64)
         st.markdown("### Contract Analyzer")
         st.caption("Análise inteligente de contratos")
 
         contracts = cached_contracts()
         if contracts:
-            options = {
-                f"{c.name} ({c.client_name}) · {c.id[:6]}": c.id for c in contracts
-            }
+            from app.utils.ui import _filter_contracts, _contract_label
+
+            sb_search = st.text_input(
+                "Buscar",
+                key="sidebar_contract_search",
+                placeholder="Contrato ou cliente…",
+                label_visibility="collapsed",
+            )
+            filtered = _filter_contracts(contracts, search_q=sb_search)
+            if not filtered and sb_search.strip():
+                filtered = list(contracts)
+            options = {_contract_label(c): c.id for c in filtered}
             labels = list(options.keys())
             idx = 0
             if st.session_state.active_contract_id:
@@ -487,11 +529,12 @@ def render_app_sidebar() -> None:
                         break
             sel = st.selectbox("Contrato ativo", labels, index=idx, key="sidebar_contract")
             on_sidebar_contract_changed(options[sel])
-            active = next((c for c in contracts if c.id == options[sel]), None)
-            if active and db.contract_has_proposal(active):
-                st.caption(f"📎 Proposta: {active.proposal_label}")
-            elif active:
-                st.caption("⚠️ Sem proposta vinculada")
+            active = next((c for c in filtered if c.id == options[sel]), None)
+            if active:
+                n_ver = len(db.get_versions(active.id))
+                st.caption(f"{n_ver} versão(ões)")
+                if db.contract_has_proposal(active):
+                    st.caption(f"Proposta: {active.proposal_label}")
         else:
             st.caption("Nenhum contrato cadastrado")
 
@@ -504,7 +547,7 @@ def render_app_sidebar() -> None:
         st.divider()
         st.page_link("main.py", label="Início")
         st.page_link("pages/01_upload.py", label="Upload & Análise inicial")
-        st.page_link("pages/02_compare.py", label="Comparar versões (comentários)")
+        st.page_link("pages/02_compare.py", label="Comparar versões")
         st.page_link("pages/04_history.py", label="Histórico")
         st.divider()
         st.caption("Powered by Google Gemini")

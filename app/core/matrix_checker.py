@@ -25,6 +25,7 @@ from app.utils.helpers import chunk_text, count_tokens, safe_json_parse
 from app.utils.settings import get_settings
 
 ProgressCallback = Callable[[int, int, str], None]
+ItemCompleteCallback = Callable[[MatrixParameterCheck, int, int], None]
 
 
 def _analysis_max_tokens() -> int:
@@ -540,18 +541,21 @@ def _analyze_one_matrix_item(
     )
 
 
-def _analyze_per_item_with_proposal(
+def _analyze_per_item(
     contract_text: str,
     matrix_items: list[dict],
     contract_id: str,
     *,
-    proposal_text: str,
+    proposal_text: str | None = None,
     proposal_label: str = "Proposta comercial",
     progress_callback: ProgressCallback | None = None,
+    item_complete_callback: ItemCompleteCallback | None = None,
 ) -> ContractMatrixInitialResult:
     total = len(matrix_items)
+    has_proposal = bool((proposal_text or "").strip())
     logger.info(
-        "Matriz item a item com proposta: {} parâmetros, max_tokens={}",
+        "Matriz item a item (proposta={}): {} parâmetros, max_tokens={}",
+        has_proposal,
         total,
         _analysis_max_tokens(),
     )
@@ -562,26 +566,28 @@ def _analyze_per_item_with_proposal(
         if progress_callback:
             progress_callback(idx + 1, total, label)
         logger.info("Matriz item {}/{} — {}", idx + 1, total, label)
-        checks.append(
-            _analyze_one_matrix_item(
-                contract_text,
-                item,
-                proposal_text=proposal_text,
-                proposal_label=proposal_label,
-            )
+        check = _analyze_one_matrix_item(
+            contract_text,
+            item,
+            proposal_text=proposal_text,
+            proposal_label=proposal_label,
         )
+        checks.append(check)
+        if item_complete_callback:
+            item_complete_callback(check, idx + 1, total)
+
+    summary_hint = f"Verificação item a item ({total} parâmetros)."
+    if has_proposal:
+        summary_hint += f" Consulta à proposta «{proposal_label}»."
 
     return _merge_checks(
         checks,
         matrix_items,
         contract_id,
-        executive_summary_hint=(
-            f"Verificação item a item ({total} parâmetros) com consulta à proposta "
-            f"«{proposal_label}»."
-        ),
-        proposal_used=True,
+        executive_summary_hint=summary_hint,
+        proposal_used=has_proposal,
         proposal_label=proposal_label,
-        analysis_mode="item_a_item_proposta",
+        analysis_mode="item_a_item_proposta" if has_proposal else "item_a_item",
     )
 
 
@@ -630,12 +636,13 @@ def check_matrix_against_contract(
     proposal_text: str | None = None,
     proposal_label: str = "Proposta comercial",
     progress_callback: ProgressCallback | None = None,
+    item_complete_callback: ItemCompleteCallback | None = None,
 ) -> ContractMatrixInitialResult:
     """
     Verifica parâmetros da matriz no contrato (análise inicial).
 
-    Com proposta cadastrada: uma chamada à IA por parâmetro (mais confiável).
-    Sem proposta: análise em lote; contratos grandes usam chunking.
+    Com item_complete_callback ou proposta: uma chamada à IA por parâmetro.
+    Sem proposta e sem callback: análise em lote; contratos grandes usam chunking.
     """
     if not matrix_items:
         raise ValueError("A matriz de verificação está vazia. Configure ao menos um parâmetro.")
@@ -644,21 +651,23 @@ def check_matrix_against_contract(
     has_proposal = bool((proposal_text or "").strip())
 
     logger.info(
-        "check_matrix: {} tokens, {} parâmetros, proposta={}, max_tokens={}",
+        "check_matrix: {} tokens, {} parâmetros, proposta={}, streaming={}, max_tokens={}",
         token_count,
         len(matrix_items),
         has_proposal,
+        item_complete_callback is not None,
         _analysis_max_tokens(),
     )
 
-    if has_proposal:
-        return _analyze_per_item_with_proposal(
+    if item_complete_callback is not None or has_proposal:
+        return _analyze_per_item(
             contract_text,
             matrix_items,
             contract_id,
-            proposal_text=proposal_text.strip(),
+            proposal_text=proposal_text.strip() if has_proposal else None,
             proposal_label=proposal_label,
             progress_callback=progress_callback,
+            item_complete_callback=item_complete_callback,
         )
 
     if token_count <= CHUNK_TOKEN_LIMIT:
