@@ -1,0 +1,36 @@
+# Ambiente local
+.venv/
+.env
+.env.*
+!.env.example
+!.env.docker.example
+
+# Dados (montados via volume em runtime)
+data/
+contracts/
+*.db
+*.db-journal
+
+# Git e IDE
+.git/
+.gitignore
+.idea/
+.vscode/
+.cursor/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Logs e temporários
+*.log
+terminals/
+
+# Documentação e fontes de dev (não necessários na imagem)
+arquivos fonte/

@@ -1,4 +1,4 @@
-"""Exportação do documento comentado — download, Salvar como (Windows) e caminho manual."""
+"""Exportação do documento comentado — download e caminho manual (sem tkinter)."""
 
 from __future__ import annotations
 
@@ -20,14 +20,33 @@ def _mime_for(path: str | Path) -> str:
     return "application/octet-stream"
 
 
+def _export_title_for(path: str | Path) -> str:
+    ext = Path(path).suffix.lower()
+    if ext == ".pdf":
+        return "Salvar PDF comentado"
+    if ext in (".docx", ".doc"):
+        return "Salvar DOCX comentado"
+    return "Exportar documento comentado"
+
+
 def _suggest_export_name(work_path: str, version) -> str:
     stem = Path(work_path).stem
+    suffix = Path(work_path).suffix
     label = getattr(version, "label", None) or ""
     if label and label not in stem:
         safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in label).strip()
         if safe:
-            return f"{stem}_{safe}{Path(work_path).suffix}"
+            return f"{stem}_{safe}{suffix}"
     return Path(work_path).name
+
+
+def _enforce_source_suffix(name: str, source_path: str | Path) -> str:
+    """Garante que o nome de download/export mantém a extensão do arquivo de origem."""
+    src_suffix = Path(source_path).suffix.lower()
+    if not src_suffix:
+        return name
+    stem = Path(name).stem if name else Path(source_path).stem
+    return f"{stem}{src_suffix}"
 
 
 def get_annotated_work_path(version) -> str | None:
@@ -36,50 +55,6 @@ def get_annotated_work_path(version) -> str | None:
     if work and Path(work).exists():
         return work
     return None
-
-
-def pick_save_as_path(
-    *,
-    initial_name: str,
-    initial_dir: Path | str | None = None,
-) -> Path | None:
-    """Abre diálogo nativo Salvar como (Windows/macOS/Linux com Tk)."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError:
-        return None
-
-    ext = Path(initial_name).suffix.lower()
-    if ext == ".pdf":
-        filetypes = [("PDF", "*.pdf"), ("Todos os arquivos", "*.*")]
-        defaultext = ".pdf"
-    elif ext in (".docx", ".doc"):
-        filetypes = [("Word", "*.docx"), ("Todos os arquivos", "*.*")]
-        defaultext = ".docx"
-    else:
-        filetypes = [("Todos os arquivos", "*.*")]
-        defaultext = ext or ".pdf"
-
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        root.attributes("-topmost", True)
-    except Exception:
-        pass
-
-    try:
-        selected = filedialog.asksaveasfilename(
-            title="Salvar documento com comentários",
-            initialfile=initial_name,
-            initialdir=str(initial_dir) if initial_dir else None,
-            defaultextension=defaultext,
-            filetypes=filetypes,
-        )
-    finally:
-        root.destroy()
-
-    return Path(selected) if selected else None
 
 
 def export_file_to_path(source: str | Path, dest: str | Path) -> Path:
@@ -91,6 +66,9 @@ def export_file_to_path(source: str | Path, dest: str | Path) -> Path:
     target = Path(dest)
     if target.is_dir():
         target = target / src.name
+
+    if src.suffix and target.suffix.lower() != src.suffix.lower():
+        target = target.with_suffix(src.suffix)
 
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, target)
@@ -109,10 +87,10 @@ def render_annotated_export_panel(
     *,
     key_prefix: str = "exp",
     compact: bool = False,
-    title: str = "Exportar documento comentado",
+    title: str | None = None,
 ) -> bool:
     """
-    Oferece Salvar como: download do navegador, diálogo nativo ou caminho digitado.
+    Oferece download do navegador ou caminho digitado manualmente.
     Retorna True se há arquivo comentado disponível para exportar.
     """
     work = get_annotated_work_path(version)
@@ -121,58 +99,42 @@ def render_annotated_export_panel(
             st.caption("Grave comentários no PDF antes de exportar.")
         return False
 
+    panel_title = title or _export_title_for(work)
     suggested = _suggest_export_name(work, version)
     fname_key = f"{key_prefix}_export_fname"
     if fname_key not in st.session_state:
         st.session_state[fname_key] = suggested
 
     if not compact:
-        st.markdown(f"**{title}**")
+        st.markdown(f"**{panel_title}**")
+        ext_label = Path(work).suffix.upper().lstrip(".") or "arquivo"
         st.caption(
-            "Escolha onde salvar o PDF/DOCX com os comentários gravados. "
-            "No app local (Windows), use **Escolher pasta** para abrir a janela **Salvar como**."
+            f"Escolha onde salvar o {ext_label} com os comentários gravados. "
+            "Use **Salvar como** (download) ou informe o caminho completo abaixo."
         )
 
-    file_name = st.text_input(
+    raw_name = st.text_input(
         "Nome do arquivo",
         key=fname_key,
-        help="Nome sugerido ao salvar. Você pode alterar antes de exportar.",
+        help=f"Extensão fixa: {Path(work).suffix}",
         label_visibility="visible",
     )
+    file_name = _enforce_source_suffix(raw_name or suggested, work)
 
     data = Path(work).read_bytes()
     mime = _mime_for(work)
+    dl_label = "💾 Salvar PDF" if Path(work).suffix.lower() == ".pdf" else "💾 Salvar DOCX"
 
-    btn_dl, btn_native = st.columns(2)
-    with btn_dl:
-        st.download_button(
-            "💾 Salvar como… (download)",
-            data,
-            file_name=file_name or suggested,
-            mime=mime,
-            key=f"{key_prefix}_dl_saveas",
-            type="primary",
-            use_container_width=True,
-            help="Abre a janela Salvar como do navegador para escolher a pasta.",
-        )
-    with btn_native:
-        if st.button(
-            "📂 Escolher pasta no computador…",
-            key=f"{key_prefix}_native_saveas",
-            use_container_width=True,
-            help="Diálogo Salvar como do Windows (app rodando localmente).",
-        ):
-            dest = pick_save_as_path(
-                initial_name=file_name or suggested,
-                initial_dir=_default_export_dir(),
-            )
-            if dest:
-                try:
-                    saved = export_file_to_path(work, dest)
-                    st.session_state[f"{key_prefix}_last_export"] = str(saved)
-                    st.success(f"Salvo em: `{saved}`")
-                except OSError as exc:
-                    st.error(f"Não foi possível salvar: {exc}")
+    st.download_button(
+        f"{dl_label} (download)",
+        data,
+        file_name=file_name,
+        mime=mime,
+        key=f"{key_prefix}_dl_saveas",
+        type="primary",
+        use_container_width=True,
+        help="Abre a janela Salvar como do navegador.",
+    )
 
     last = st.session_state.get(f"{key_prefix}_last_export")
     if last and Path(last).exists():
@@ -191,10 +153,53 @@ def render_annotated_export_panel(
                     st.warning("Informe o caminho completo.")
                 else:
                     try:
-                        saved = export_file_to_path(work, path_val.strip())
+                        dest = path_val.strip()
+                        if not Path(dest).suffix:
+                            dest = str(Path(dest) / file_name)
+                        else:
+                            dest = str(Path(dest).with_suffix(Path(work).suffix))
+                        saved = export_file_to_path(work, dest)
                         st.session_state[f"{key_prefix}_last_export"] = str(saved)
                         st.success(f"Salvo em: `{saved}`")
                     except OSError as exc:
                         st.error(f"Não foi possível salvar: {exc}")
 
+    return True
+
+
+def render_prominent_save_cta(
+    version,
+    *,
+    key_prefix: str = "save_cta",
+    message: str | None = None,
+) -> bool:
+    """
+    Banner destacado com botão de download após gravar comentários no arquivo.
+    Retorna True se o arquivo comentado está disponível.
+    """
+    work = get_annotated_work_path(version)
+    if not work:
+        return False
+
+    ext = Path(work).suffix.upper().lstrip(".") or "arquivo"
+    suggested = _suggest_export_name(work, version)
+    file_name = _enforce_source_suffix(suggested, work)
+    data = Path(work).read_bytes()
+    mime = _mime_for(work)
+
+    st.success(
+        message
+        or f"Comentário gravado no {ext}. **Salve o arquivo** no seu computador com o botão abaixo."
+    )
+    st.download_button(
+        f"💾 Salvar {ext} comentado no computador",
+        data,
+        file_name=file_name,
+        mime=mime,
+        key=f"{key_prefix}_prominent_dl",
+        type="primary",
+        use_container_width=True,
+        help="Abre a janela «Salvar como» do navegador.",
+    )
+    st.caption(f"Arquivo de trabalho: `{Path(work).name}`")
     return True

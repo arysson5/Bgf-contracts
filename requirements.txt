@@ -18,6 +18,13 @@ langchain-text-splitters>=0.2.0
 # Diff engine
 diff-match-patch>=20230430
 
+# Auth
+bcrypt>=4.1.0
+
+# API REST complementar
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
 # Banco de dados
 sqlmodel>=0.0.19
 sqlalchemy>=2.0.0
@@ -32,3 +39,7 @@ rapidfuzz>=3.9.0
 tiktoken>=0.7.0
 loguru>=0.7.0
 tenacity>=8.3.0
+
+# API (viewer Fase 5)
+fastapi>=0.111.0
+uvicorn>=0.30.0

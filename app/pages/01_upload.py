@@ -1,6 +1,11 @@
 """Upload de contrato + análise inicial pela matriz de parâmetros."""
 
+import sys
 from pathlib import Path
+
+_project_root = Path(__file__).resolve().parents[2]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import streamlit as st
 
@@ -27,8 +32,14 @@ from app.utils.theme import page_header, render_page_footer, section_title, setu
 from app.utils.active_contract import (
     contract_identity_matches,
     get_active_contract,
+    init_upload_version_label_widget,
     render_active_contract_banner,
     resolve_contract_for_upload,
+)
+from app.utils.analysis_session import (
+    clear_matrix_initial_analysis_results,
+    matrix_analysis_matches_version,
+    set_matrix_analysis_token,
 )
 from app.utils.ui import save_uploaded_file
 
@@ -41,6 +52,8 @@ page_header(
 )
 
 render_active_contract_banner(context="upload")
+
+init_upload_version_label_widget()
 
 RISK_ICON = {ChangeRisk.HIGH: "🔴", ChangeRisk.MEDIUM: "🟡", ChangeRisk.LOW: "🟢"}
 
@@ -73,76 +86,82 @@ def _render_matrix_summary(result: ContractMatrixInitialResult) -> None:
     if result.critical_gaps:
         st.error("Lacunas críticas:\n- " + "\n- ".join(result.critical_gaps))
 
-section_title("1. Contrato")
-uploaded = st.file_uploader("Arquivo (PDF ou DOCX)", type=["pdf", "docx"])
-col1, col2, col3 = st.columns(3)
-with col1:
-    contract_name = st.text_input("Nome do contrato", key="upload_contract_name")
-with col2:
-    client_name = st.text_input("Nome do cliente", key="upload_client_name")
-with col3:
-    if "upload_version_label" not in st.session_state:
-        st.session_state["upload_version_label"] = st.session_state.get(
-            "upload_version_label_default", "Original"
-        )
-    version_label = st.text_input("Label da versão", key="upload_version_label")
 
-active_rec = get_active_contract()
-if active_rec and contract_name and client_name:
-    if not contract_identity_matches(contract_name, client_name, active_rec):
-        st.caption("Será criado um **novo contrato** (nome ou cliente diferente do ativo).")
+def _render_contract_upload() -> None:
+    uploaded = st.file_uploader(
+        "Arquivo (PDF ou DOCX)",
+        type=["pdf", "docx"],
+        key="upload_contract_file",
+    )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        contract_name = st.text_input("Nome do contrato", key="upload_contract_name")
+    with col2:
+        client_name = st.text_input("Nome do cliente", key="upload_client_name")
+    with col3:
+        version_label = st.text_input("Label da versão", key="upload_version_label")
 
-version_id = st.session_state.get("upload_version_id")
+    active_rec = get_active_contract()
+    if active_rec and contract_name and client_name:
+        if not contract_identity_matches(contract_name, client_name, active_rec):
+            st.caption("Será criado um **novo contrato** (nome ou cliente diferente do ativo).")
 
-if uploaded and contract_name and client_name:
-    if st.button("Salvar contrato", type="primary"):
-        try:
-            with st.spinner("Extraindo texto..."):
-                path = save_uploaded_file(uploaded, settings.contracts_path)
-                text, doc_type = extractor.extract_text(path)
+    if uploaded and contract_name and client_name:
+        if st.button("Salvar contrato", type="primary", key="upload_save_contract"):
+            try:
+                with st.spinner("Extraindo texto..."):
+                    path = save_uploaded_file(uploaded, settings.contracts_path)
+                    text, doc_type = extractor.extract_text(path)
 
-            contract_id, created_new = resolve_contract_for_upload(contract_name, client_name)
+                contract_id, created_new = resolve_contract_for_upload(contract_name, client_name)
 
-            version = db.add_version(
-                contract_id, version_label, path, doc_type, text
-            )
-            clear_data_cache()
-            st.session_state.active_version_id = version.id
-            st.session_state.upload_version_id = version.id
-            version_id = version.id
-            if created_new:
-                st.success(f"Contrato **{contract_name}** criado — v{version.version_number} salva.")
-            else:
-                st.success(f"Versão v{version.version_number} salva.")
-        except ValueError as exc:
-            st.error(str(exc))
-        except Exception as exc:
-            logger.exception("Erro no upload")
-            st.error(f"Arquivo corrompido ou ilegível: {exc}")
+                version = db.add_version(
+                    contract_id, version_label, path, doc_type, text
+                )
+                clear_data_cache()
+                st.session_state.active_version_id = version.id
+                st.session_state.upload_version_id = version.id
+                st.session_state["upload_version_label_default"] = (
+                    f"Revisão v{version.version_number + 1}"
+                )
+                if created_new:
+                    st.success(
+                        f"Contrato **{contract_name}** criado — v{version.version_number} salva."
+                    )
+                else:
+                    st.success(f"Versão v{version.version_number} salva.")
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                logger.exception("Erro no upload")
+                msg = str(exc)
+                if "session_state" in msg and "upload_version_label" in msg:
+                    st.error(
+                        "Conflito interno do formulário. Atualize a página (F5) e tente novamente."
+                    )
+                elif "getvalue" in msg.lower() or "uploadedfile" in msg.lower():
+                    st.error(
+                        "Arquivo não disponível. Selecione o PDF/DOCX novamente e clique em Salvar."
+                    )
+                else:
+                    st.error(f"Arquivo corrompido ou ilegível: {exc}")
 
-if version_id:
-    ver_active = db.get_version(version_id)
-    if ver_active:
-        st.caption(f"Versão ativa: **v{ver_active.version_number}** — {ver_active.label}")
-elif st.session_state.get("active_contract_id"):
-    st.warning("Envie o primeiro PDF/DOCX ou escolha outro contrato na sidebar.")
 
-section_title("2. Proposta comercial (opcional)")
-st.caption("Vinculada a este contrato. Sem proposta, a análise usa apenas a matriz no texto do contrato.")
+def _render_proposal_upload() -> None:
+    proposal_contract_id = st.session_state.get("active_contract_id")
+    version_id_local = st.session_state.get("upload_version_id")
+    if not proposal_contract_id and version_id_local:
+        ver_tmp = db.get_version(version_id_local)
+        if ver_tmp:
+            proposal_contract_id = ver_tmp.contract_id
+    if not proposal_contract_id:
+        return
 
-proposal_contract_id = st.session_state.get("active_contract_id")
-if not proposal_contract_id and version_id:
-    ver_tmp = db.get_version(version_id)
-    if ver_tmp:
-        proposal_contract_id = ver_tmp.contract_id
-
-if proposal_contract_id:
     contract_rec = db.get_contract(proposal_contract_id)
     has_proposal = contract_rec and db.contract_has_proposal(contract_rec)
     if has_proposal:
-        st.caption(
-            f"Proposta cadastrada: **{contract_rec.proposal_label}**"
-        )
+        st.caption(f"Proposta cadastrada: **{contract_rec.proposal_label}**")
         if contract_rec.proposal_file_path:
             with open(contract_rec.proposal_file_path, "rb") as pf:
                 st.download_button(
@@ -181,18 +200,49 @@ if proposal_contract_id:
             st.rerun()
         except Exception as exc:
             st.error(str(exc))
-else:
+
+
+def _render_matrix_section() -> list[dict]:
+    return render_matrix_editor(
+        section_label="Parâmetros de verificação",
+        template_key="upload_matrix_template_choice",
+        new_name_key="upload_matrix_new_name",
+        new_rows_key="upload_matrix_new_rows",
+        new_editor_key="upload_matrix_new_editor",
+        save_new_key="upload_matrix_save_new",
+    )
+
+
+def _load_matrix_items() -> list[dict]:
+    items = _render_matrix_section()
+    if items:
+        st.session_state["_upload_matrix_items"] = items
+        return items
+    return st.session_state.get("_upload_matrix_items", [])
+
+
+section_title("1. Contrato")
+
+_render_contract_upload()
+
+version_id = st.session_state.get("upload_version_id")
+
+if version_id:
+    ver_active = db.get_version(version_id)
+    if ver_active:
+        st.caption(f"Versão ativa: **v{ver_active.version_number}** — {ver_active.label}")
+elif st.session_state.get("active_contract_id"):
+    st.warning("Envie o primeiro PDF/DOCX ou escolha outro contrato na sidebar.")
+
+section_title("2. Proposta comercial (opcional)")
+st.caption("Vinculada a este contrato. Sem proposta, a análise usa apenas a matriz no texto do contrato.")
+
+_render_proposal_upload()
+if not st.session_state.get("active_contract_id") and not st.session_state.get("upload_version_id"):
     st.caption("Salve uma versão do contrato para vincular a proposta.")
 
 section_title("3. Matriz de parâmetros")
-matrix_items = render_matrix_editor(
-    section_label="Parâmetros de verificação",
-    template_key="upload_matrix_template_choice",
-    new_name_key="upload_matrix_new_name",
-    new_rows_key="upload_matrix_new_rows",
-    new_editor_key="upload_matrix_new_editor",
-    save_new_key="upload_matrix_save_new",
-)
+matrix_items = _load_matrix_items()
 
 section_title("4. Analisar")
 can_analyze = bool(version_id) and len(matrix_items) > 0
@@ -205,6 +255,7 @@ if can_analyze:
             st.warning(f"Contrato grande (~{token_est:,} tokens) — análise pode levar vários minutos.")
 
 if st.button("Analisar contrato", type="primary", disabled=not can_analyze):
+    clear_matrix_initial_analysis_results()
     ver = db.get_version(version_id)
     try:
         contract_rec = db.get_contract(ver.contract_id)
@@ -269,6 +320,7 @@ if st.button("Analisar contrato", type="primary", disabled=not can_analyze):
         clear_data_cache()
         st.session_state.last_matrix_initial_result = result
         st.session_state.checklist_version_id = version_id
+        set_matrix_analysis_token(version_id)
         st.session_state.matrix_analysis_saved = True
         mark_comment_queue_for_rebuild(version_id, "upload_mtx")
         st.success("Análise concluída e salva no **Histórico**.")
@@ -279,9 +331,9 @@ if st.button("Analisar contrato", type="primary", disabled=not can_analyze):
         logger.exception("Erro na análise")
         st.warning(f"Erro na análise: {exc}. Tente novamente.")
 
-matrix_result: ContractMatrixInitialResult | None = st.session_state.get(
-    "last_matrix_initial_result"
-)
+matrix_result: ContractMatrixInitialResult | None = None
+if matrix_analysis_matches_version(version_id):
+    matrix_result = st.session_state.get("last_matrix_initial_result")
 if matrix_result:
     section_title("Resultado")
     if st.session_state.pop("matrix_analysis_saved", False):

@@ -1,6 +1,11 @@
 """Histórico de análises por cliente/contrato."""
 
+import sys
 from pathlib import Path
+
+_project_root = Path(__file__).resolve().parents[2]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import streamlit as st
 
@@ -19,9 +24,13 @@ from app.models.schemas import (
     DocumentCommentsBundle,
     MatrixItemStatus,
     ProposalContractMatrixResult,
+    TextDiffResult,
 )
+from app.utils.auth import get_current_user_id
+from app.utils.data_cache import clear_data_cache
 from app.utils.datetime_br import format_brazil_datetime
-from app.utils.document_ui import render_document_navigator
+from app.utils.document_ui import render_document_navigator, render_side_by_side_documents
+from app.utils.sync_scroll import ensure_sync_scroll_handler, sync_scroll_hint
 from app.utils.pdf_ui import show_pdf
 from app.utils.theme import page_header, render_page_footer, section_title, setup_page
 from app.utils.ui import render_contract_selector
@@ -34,7 +43,10 @@ contract_id = render_contract_selector("history_contract")
 if not contract_id:
     st.stop()
 
-contract = db.get_contract(contract_id)
+contract = db.get_contract(contract_id, owner_user_id=get_current_user_id())
+if not contract:
+    st.warning("Contrato não encontrado ou sem permissão.")
+    st.stop()
 analyses = db.get_analyses_for_contract(contract_id)
 if not analyses:
     st.warning("Nenhuma análise salva.")
@@ -44,6 +56,7 @@ type_labels = {
     "checklist": "Checklist (requisitos)",
     "matrix_initial": "Análise inicial (parâmetros)",
     "diff": "Análise contratual",
+    "text_diff": "Comparar textos",
     "comments": "Comentários (legado)",
     "document_comments": "Comentários no documento",
     "matrix": "Proposta × Contrato",
@@ -58,12 +71,27 @@ selected = st.selectbox("Análise", options)
 idx = options.index(selected)
 record, version = analyses[idx]
 
-if st.button("Carregar na sessão", type="primary"):
+col_load, col_del = st.columns([2, 1])
+with col_load:
+    load_clicked = st.button("Carregar na sessão", type="primary")
+with col_del:
+    confirm_del = st.checkbox("Confirmar exclusão", key=f"hist_del_confirm_{record.id}")
+    if st.button("Excluir análise", key=f"hist_del_{record.id}", disabled=not confirm_del):
+        if db.delete_analysis_result(record.id):
+            clear_data_cache()
+            st.success("Análise excluída.")
+            st.rerun()
+        else:
+            st.error("Não foi possível excluir.")
+
+if load_clicked:
     data = db.load_analysis_json(record)
     if record.analysis_type == "checklist":
         st.session_state.last_checklist_result = ContractChecklistResult.model_validate(data)
     elif record.analysis_type == "diff":
         st.session_state.last_diff_result = ContractDiffResult.from_stored(data)
+    elif record.analysis_type == "text_diff":
+        st.session_state.last_text_diff_result = TextDiffResult.model_validate(data)
     elif record.analysis_type == "comments":
         st.session_state.last_comments_result = CommentsReviewResult.model_validate(data)
         p = data.get("annotated_file_path") or data.get("annotated_pdf_path")
@@ -119,20 +147,28 @@ elif record.analysis_type == "diff":
 
     versions = db.get_versions(contract_id)
     base_v = versions[0] if versions else version
-    if result.contractual_changes:
-        t1, t2 = st.tabs([f"Doc: {version.label}", f"Doc: {base_v.label}"])
-        with t1:
-            render_document_navigator(
-                version.file_path, version.file_type,
-                result.contractual_changes, version_side="new",
-                key_prefix=f"hist_dn_{record.id}",
-            )
-        with t2:
-            render_document_navigator(
-                base_v.file_path, base_v.file_type,
-                result.contractual_changes, version_side="base",
-                key_prefix=f"hist_db_{record.id}",
-            )
+    if result.contractual_changes or result.similarity_score:
+        render_side_by_side_documents(
+            base_v.file_path,
+            base_v.file_type,
+            version.file_path,
+            version.file_type,
+            label_a=base_v.label,
+            label_b=version.label,
+            changes=result.contractual_changes,
+            key_prefix=f"hist_sbs_{record.id}",
+        )
+
+elif record.analysis_type == "text_diff":
+    result = TextDiffResult.model_validate(data)
+    st.metric("Similaridade", f"{result.similarity_score:.0%}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Adicionados", result.paragraphs_added)
+    c2.metric("Removidos", result.paragraphs_removed)
+    c3.metric("Alterados", result.paragraphs_modified)
+    ensure_sync_scroll_handler()
+    st.markdown(result.side_by_side_html, unsafe_allow_html=True)
+    sync_scroll_hint()
 
 elif record.analysis_type == "comments":
     result = CommentsReviewResult.model_validate(data)

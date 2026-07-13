@@ -1,6 +1,7 @@
 @echo off
 title Contract Analyzer
 cd /d %~dp0
+set PYTHONPATH=%~dp0
 echo Iniciando Contract Analyzer...
 if exist ".venv\Scripts\python.exe" (
     echo Verificando Visual C++ e ambiente Python...

@@ -1,5 +1,12 @@
 """Entry point Streamlit — Contract Analyzer."""
 
+import sys
+from pathlib import Path
+
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import streamlit as st
 
 from app.utils.dev_reload import sync_app_modules
@@ -7,10 +14,10 @@ from app.utils.dev_reload import sync_app_modules
 sync_app_modules(st.session_state)
 
 from app.utils.data_cache import (
-    cached_analyses_today_count,
-    cached_contracts,
-    cached_recent_analyses,
-    cached_version_count,
+    cached_analyses_today_count_for_session,
+    cached_contracts_for_session,
+    cached_recent_analyses_for_session,
+    cached_version_count_for_session,
 )
 from app.utils.theme import (
     activity_feed,
@@ -23,11 +30,11 @@ from app.utils.theme import (
 
 setup_page("Contract Analyzer")
 
-contracts = cached_contracts()
+contracts = cached_contracts_for_session()
 total_contracts = len(contracts)
-analyses_today = cached_analyses_today_count()
-recent = cached_recent_analyses(5)
-total_versions = cached_version_count()
+analyses_today = cached_analyses_today_count_for_session()
+recent = cached_recent_analyses_for_session(5)
+total_versions = cached_version_count_for_session()
 
 hero_block(
     "Contract Analyzer",
@@ -57,6 +64,13 @@ with c2:
 with c3:
     if st.button("Histórico", width="stretch"):
         st.switch_page("pages/04_history.py")
+
+from app.utils.auth import is_admin
+
+if is_admin():
+    section_title("Administração")
+    if st.button("Gerenciar usuários", type="secondary", width="stretch"):
+        st.switch_page("pages/05_users.py")
 
 section_title("Módulos do sistema")
 f1, f2, f3 = st.columns(3)

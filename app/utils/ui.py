@@ -5,8 +5,14 @@ from pathlib import Path
 import streamlit as st
 
 from app.db import database as db
-from app.utils.data_cache import cached_contracts, clear_data_cache
+from app.utils.data_cache import cached_contracts_for_session, clear_data_cache
 from app.utils.security import safe_temp_path, safe_upload_path
+
+
+def _owner_id() -> str | None:
+    from app.utils.auth import get_current_user_id
+
+    return get_current_user_id()
 
 
 def init_session_state() -> None:
@@ -54,7 +60,7 @@ def _unique_sorted_clients(contracts) -> list[str]:
 @st.cache_data(ttl=20, show_spinner=False)
 def _version_counts() -> dict[str, int]:
     counts: dict[str, int] = {}
-    for c in cached_contracts():
+    for c in cached_contracts_for_session():
         counts[c.id] = len(db.get_versions(c.id))
     return counts
 
@@ -97,7 +103,7 @@ def render_contract_browse_selector(
     """
     Seleciona contrato salvo por cliente, busca e nome.
     """
-    contracts = cached_contracts()
+    contracts = cached_contracts_for_session()
     if not contracts:
         st.info("Nenhum contrato cadastrado. Comece em **Upload & Análise inicial**.")
         return None
@@ -105,9 +111,10 @@ def render_contract_browse_selector(
     clients = _unique_sorted_clients(contracts)
     client_options = ["— Todos —", *clients]
 
-    active = db.get_contract(st.session_state.active_contract_id) if st.session_state.get(
-        "active_contract_id"
-    ) else None
+    active = db.get_contract(
+        st.session_state.active_contract_id,
+        owner_user_id=_owner_id(),
+    ) if st.session_state.get("active_contract_id") else None
     default_client_idx = 0
     if active and active.client_name.strip() in clients:
         default_client_idx = client_options.index(active.client_name.strip())
@@ -166,7 +173,7 @@ def render_contract_browse_selector(
 
         on_sidebar_contract_changed(contract_id)
 
-    rec = db.get_contract(contract_id)
+    rec = db.get_contract(contract_id, owner_user_id=_owner_id())
     if rec:
         n_ver = _version_counts().get(contract_id, 0)
         has_prop = db.contract_has_proposal(rec)

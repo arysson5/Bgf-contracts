@@ -17,6 +17,14 @@ class DiffType(str, Enum):
     UNCHANGED = "unchanged"
 
 
+class AnalysisMode(str, Enum):
+    """Modos de comparação entre versões."""
+    TEXT_DIFF = "text_diff"
+    DIFERENCAS = "diferencas"
+    VALIDACAO = "validacao"
+    CRITERIOSA = "criteriosa"
+
+
 class ChangeRisk(str, Enum):
     LOW = "baixo"
     MEDIUM = "medio"
@@ -161,6 +169,32 @@ class VersionRegressionResult(BaseModel):
     executive_summary: str = ""
     alerts: list[VersionRegressionAlert] = []
     analysis_timestamp: datetime
+
+
+# --- Diff textual determinístico (sem IA) ---
+
+class TextDiffHunk(BaseModel):
+    hunk_id: str
+    change_type: str  # unchanged | added | removed | modified
+    text_a: Optional[str] = None
+    text_b: Optional[str] = None
+    locations_base: list[TextLocation] = []
+    locations_new: list[TextLocation] = []
+
+
+class TextDiffResult(BaseModel):
+    contract_id: str
+    version_a_label: str
+    version_b_label: str
+    hunks: list[TextDiffHunk] = []
+    paragraph_hunks: list[TextDiffHunk] = []
+    paragraphs_added: int = 0
+    paragraphs_removed: int = 0
+    paragraphs_modified: int = 0
+    similarity_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    side_by_side_html: str = ""
+    inline_diff_html: str = ""
+    analysis_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 # --- Comparação de versões (análise contratual) ---
@@ -358,7 +392,9 @@ class CommentReview(BaseModel):
     justification: str
     change_found: Optional[str] = None
     suggested_response: str
+    matched_hunk_ids: list[str] = []
     locations: list[TextLocation] = []
+    locations_base: list[TextLocation] = []
     comment_approved: bool = False
 
 

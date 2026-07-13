@@ -10,6 +10,8 @@ import streamlit as st
 from loguru import logger
 
 from app.core import extractor, reviewer
+from app.core.diff_index import DiffHunkIndex, location_label
+from app.core.text_diff import compute_text_diff
 from app.core.comment_suggester import (
     review_needs_reinforcement,
     suggest_for_checklist_gap,
@@ -31,6 +33,7 @@ from app.models.schemas import (
     MatrixParameterCheck,
     ProposalContractMatrixResult,
     RequirementCheck,
+    TextDiffResult,
 )
 from app.utils.document_ui import render_document_navigator
 from app.utils.theme import section_title
@@ -41,6 +44,45 @@ _STATUS_BADGE = {
     CommentStatus.PARTIALLY: "⚠️ Parcial",
     CommentStatus.NOT_ATTENDED: "❌ Não atendido",
 }
+
+_STATUS_HELP = {
+    CommentStatus.ATTENDED: (
+        "O pedido do comentário foi implementado em um bloco de diferença textual "
+        "entre a versão base e a revisada."
+    ),
+    CommentStatus.PARTIALLY: (
+        "Parte do pedido foi atendida, mas falta algo relevante, ou a alteração é "
+        "ambígua e merece revisão humana."
+    ),
+    CommentStatus.NOT_ATTENDED: (
+        "Nenhum bloco de diferença textual implementa o pedido — o trecho permanece inalterado no diff."
+    ),
+}
+
+
+def render_comment_status_legend() -> None:
+    """Explica as categorias de avaliação de comentários."""
+    with st.expander("ℹ️ Como interpretar as categorias de avaliação", expanded=False):
+        st.markdown(
+            """
+**✅ Atendido** — o pedido aparece implementado em um **bloco de diferença textual**
+entre a versão base e a revisada (pode ser fora do trecho do balão, mas sempre no diff).
+
+**⚠️ Atendido parcialmente** — há alteração relacionada no diff, mas o pedido não foi
+totalmente atendido ou a evidência não é conclusiva.
+
+**❌ Não atendido** — nenhum bloco de diferença textual responde ao pedido;
+o trecho correspondente está inalterado entre as versões.
+
+A verificação usa **diff textual puro**: a IA recebe **todos** os blocos que mudaram
+e verifica cada comentário contra cada um. Embeddings servem só para localização no PDF/DOCX
+e para indicar qual bloco parece mais relacionado (não filtra o que vai para a IA).
+A taxa de atendimento considera apenas os **plenamente atendidos** (verde).
+Comentários parciais (amarelo) ainda exigem atenção.
+            """
+        )
+        for status, badge in _STATUS_BADGE.items():
+            st.caption(f"{badge}: {_STATUS_HELP[status]}")
 
 
 def _bundles_store() -> dict[str, dict]:
@@ -74,12 +116,25 @@ def _ensure_work_file(bundle: DocumentCommentsBundle, source_path: str) -> str:
 
 
 def _draft_from_extracted(raw: dict) -> DocumentCommentDraft:
+    cid = raw.get("stable_id") or raw.get("id") or str(uuid.uuid4())[:8]
     return DocumentCommentDraft(
-        comment_id=raw.get("id") or str(uuid.uuid4())[:8],
+        comment_id=cid,
         comment_text=raw.get("comment_text", ""),
         anchor_text=raw.get("referenced_text") or None,
         source=DocumentCommentSource.EXTRACTED,
         page_hint=str(raw.get("page")) if raw.get("page") else None,
+    )
+
+
+def _persist_comment_record(version_id: str, draft: DocumentCommentDraft) -> None:
+    db.save_comment_record(
+        version_id,
+        draft.comment_id,
+        draft.comment_text,
+        anchor_text=draft.anchor_text or "",
+        source=draft.source.value,
+        page_hint=draft.page_hint or "",
+        parent_comment_id=draft.source_ref,
     )
 
 
@@ -94,8 +149,17 @@ def add_comment_draft(
     file_path: str | None = None,
     file_type: str | None = None,
 ) -> DocumentCommentDraft:
+    stable_id = str(uuid.uuid4())[:8]
+    if file_path and anchor_text:
+        stable_id = extractor.compute_comment_stable_id(
+            file_path,
+            page=page_hint or "",
+            author="manual",
+            comment_text=comment_text.strip(),
+            referenced_text=anchor_text or "",
+        )
     draft = DocumentCommentDraft(
-        comment_id=str(uuid.uuid4())[:8],
+        comment_id=stable_id,
         comment_text=comment_text.strip(),
         anchor_text=(anchor_text or "").strip() or None,
         source=source,
@@ -108,6 +172,7 @@ def add_comment_draft(
         draft.locations = find_in_document(file_path, draft.comment_text[:120])
     bundle.comments.append(draft)
     _save_bundle(bundle)
+    _persist_comment_record(bundle.version_id, draft)
     return draft
 
 
@@ -124,6 +189,15 @@ def load_comments_from_file(bundle: DocumentCommentsBundle, file_path: str) -> i
             if anchor:
                 draft.locations = find_in_document(file_path, anchor)
         bundle.comments.append(draft)
+        stable = raw.get("stable_id") or draft.comment_id
+        db.save_comment_record(
+            bundle.version_id,
+            stable,
+            draft.comment_text,
+            anchor_text=draft.anchor_text or "",
+            source=draft.source.value,
+            page_hint=draft.page_hint or "",
+        )
         added += 1
     _save_bundle(bundle)
     return added
@@ -135,13 +209,20 @@ def _quick_applied_key(version_id: str) -> str:
 
 def get_quick_applied_ids(version_id: str) -> set[str]:
     raw = st.session_state.get(_quick_applied_key(version_id), [])
-    return set(raw) if isinstance(raw, (list, set)) else set()
+    session_ids = set(raw) if isinstance(raw, (list, set)) else set()
+    db_ids = {
+        r.stable_id
+        for r in db.get_comment_records(version_id)
+        if r.quick_applied
+    }
+    return session_ids | db_ids
 
 
 def mark_quick_applied(version_id: str, source_ref: str) -> None:
     applied = get_quick_applied_ids(version_id)
     applied.add(source_ref)
     st.session_state[_quick_applied_key(version_id)] = list(applied)
+    db.set_comment_quick_applied(version_id, source_ref, True)
 
 
 def apply_quick_comment_to_version(
@@ -231,6 +312,15 @@ def load_comments_for_version(version, contract_id: str) -> list[dict]:
     if not bundle.comments:
         load_comments_from_file(bundle, version.file_path)
     bundle = get_comments_bundle(version.id, contract_id)
+    for c in bundle.comments:
+        db.save_comment_record(
+            version.id,
+            c.comment_id,
+            c.comment_text,
+            anchor_text=c.anchor_text or "",
+            source=c.source.value,
+            page_hint=c.page_hint or "",
+        )
     return [
         {
             "id": c.comment_id,
@@ -246,7 +336,11 @@ def verify_comments_between_versions(
     base_version,
     new_version,
     contract_id: str,
-    diff_result: ContractDiffResult,
+    *,
+    text_diff: TextDiffResult | None = None,
+    diff_index: DiffHunkIndex | None = None,
+    progress_callback=None,
+    skip_llm: bool = False,
 ) -> CommentsReviewResult:
     raw_comments = load_comments_for_version(base_version, contract_id)
 
@@ -262,15 +356,43 @@ def verify_comments_between_versions(
             admin_summary="Nenhum comentário encontrado na versão base para verificar.",
         )
 
+    stable_ids = [c.get("id") for c in raw_comments if c.get("id")]
+    _ = db.get_comments_by_stable_ids(stable_ids)
+
+    if text_diff is None:
+        text_diff = compute_text_diff(
+            base_version.extracted_text,
+            new_version.extracted_text,
+            contract_id=contract_id,
+            label_a=getattr(base_version, "label", "Base") or "Base",
+            label_b=getattr(new_version, "label", "Revisada") or "Revisada",
+        )
+
+    diff_index = diff_index or DiffHunkIndex.build(
+        base_version.extracted_text,
+        new_version.extracted_text,
+        base_version.file_path,
+        new_version.file_path,
+        use_embeddings=not skip_llm,
+    )
+    text_diff.paragraph_hunks = diff_index.hunks
+
     result = reviewer.review_comments(
         raw_comments,
         base_version.extracted_text,
         new_version.extracted_text,
-        diff_result,
+        text_diff,
         contract_id,
+        skip_llm=skip_llm,
+        progress_callback=progress_callback,
+        path_base=base_version.file_path,
+        path_new=new_version.file_path,
+        diff_index=diff_index,
     )
     for rev in result.reviews:
-        anchor = rev.referenced_excerpt or rev.change_found or rev.original_comment
+        if rev.locations:
+            continue
+        anchor = rev.change_found or rev.referenced_excerpt or rev.original_comment
         if anchor:
             rev.locations = find_in_document(new_version.file_path, anchor)
     return result
@@ -283,12 +405,27 @@ def render_comment_verification_results(
     key_prefix: str = "cmt_ver",
 ) -> None:
     """Painel principal: cada comentário do contrato base vs atendimento na nova versão."""
+    try:
+        from app.utils.comment_balloons import close_comment_modal_overlay
+
+        close_comment_modal_overlay()
+    except Exception:
+        pass
+
     if verification.total_comments == 0:
         st.warning(
             "Nenhum comentário encontrado no **contrato com comentários**. "
             "Use um PDF/DOCX que tenha anotações de revisão (balões de comentário)."
         )
         return
+
+    render_comment_status_legend()
+
+    search_q = st.text_input(
+        "Buscar comentário (Ctrl+F)",
+        key=f"{key_prefix}_search",
+        placeholder="Filtrar por texto, status ou cláusula…",
+    ).strip().lower()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Atendidos", f"{verification.attended}/{verification.total_comments}")
@@ -302,6 +439,15 @@ def render_comment_verification_results(
     not_ok = [r for r in verification.reviews if r.status != CommentStatus.ATTENDED]
     if not_ok:
         st.error(f"**{len(not_ok)} pedido(s)** ainda exigem atenção na versão revisada.")
+
+    reviews_to_show = verification.reviews
+    if search_q:
+        reviews_to_show = [
+            r
+            for r in verification.reviews
+            if search_q
+            in f"{r.original_comment} {r.justification} {r.status.value}".lower()
+        ]
 
     if new_version:
         applied_ids = get_quick_applied_ids(new_version.id)
@@ -333,21 +479,37 @@ def render_comment_verification_results(
                                 source_ref=rev.comment_id,
                             )
                     st.success(f"{len(pending_quick)} comentário(s) gravado(s) no PDF.")
+                    st.session_state["bgf_show_save_cta"] = new_version.id
                     st.rerun()
                 except Exception as exc:
                     st.error(str(exc))
 
-        from app.utils.export_ui import get_annotated_work_path, render_annotated_export_panel
+        from app.utils.export_ui import (
+            get_annotated_work_path,
+            render_annotated_export_panel,
+            render_prominent_save_cta,
+        )
 
-        if get_annotated_work_path(new_version):
-            st.divider()
-            render_annotated_export_panel(
+        show_save = (
+            get_annotated_work_path(new_version)
+            or st.session_state.get("bgf_show_save_cta") == new_version.id
+        )
+        if show_save:
+            st.markdown("### 💾 Salvar arquivo comentado")
+            render_prominent_save_cta(
                 new_version,
-                key_prefix=f"{key_prefix}_export",
-                title="Salvar PDF comentado",
+                key_prefix=f"{key_prefix}_top",
             )
+            with st.expander("Mais opções de exportação", expanded=False):
+                render_annotated_export_panel(
+                    new_version,
+                    key_prefix=f"{key_prefix}_export",
+                    title="Salvar PDF comentado",
+                    compact=True,
+                )
+            st.divider()
 
-    for rev in verification.reviews:
+    for rev in reviews_to_show:
         badge = _STATUS_BADGE.get(rev.status, rev.status.value)
         icon = "✅" if rev.status == CommentStatus.ATTENDED else (
             "⚠️" if rev.status == CommentStatus.PARTIALLY else "❌"
@@ -361,6 +523,14 @@ def render_comment_verification_results(
             if rev.change_found:
                 st.markdown("**O que mudou na nova versão:**")
                 st.code(rev.change_found[:1200])
+            if rev.locations or rev.locations_base:
+                loc_parts = []
+                for loc in rev.locations[:2]:
+                    loc_parts.append(f"revisada {location_label(loc)}")
+                for loc in rev.locations_base[:2]:
+                    loc_parts.append(f"base {location_label(loc)}")
+                if loc_parts:
+                    st.caption("📍 " + " · ".join(loc_parts))
             if rev.suggested_response:
                 st.markdown("**Sugestão de resposta ao cliente:**")
                 st.write(rev.suggested_response)
@@ -394,6 +564,13 @@ def render_comment_verification_results(
                                     source_ref=rev.comment_id,
                                 )
                             st.success("Comentário gravado no PDF.")
+                            st.session_state["bgf_show_save_cta"] = new_version.id
+                            try:
+                                from app.utils.comment_balloons import close_comment_modal_overlay
+
+                                close_comment_modal_overlay()
+                            except Exception:
+                                pass
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
@@ -404,6 +581,58 @@ def render_comment_verification_results(
                     new_version.file_type,
                     excerpt_locations=rev.locations,
                     key_prefix=f"{key_prefix}_{rev.comment_id}",
+                )
+
+
+def render_paragraph_diff_locations(
+    paragraph_hunks: list,
+    *,
+    path_base: str | None = None,
+    path_new: str | None = None,
+    path_base_type: str = "pdf",
+    path_new_type: str = "pdf",
+    key_prefix: str = "diff_loc",
+) -> None:
+    """Lista blocos de diff com localização no documento (índice por embeddings)."""
+    from app.core.diff_index import format_hunk_block_with_location
+    from app.models.schemas import TextDiffHunk
+
+    if not paragraph_hunks:
+        st.info("Nenhuma diferença textual entre as versões.")
+        return
+
+    st.caption(
+        f"{len(paragraph_hunks)} bloco(s) alterado(s). "
+        "Localização obtida no PDF/DOCX e indexada para busca rápida."
+    )
+    for i, raw in enumerate(paragraph_hunks, 1):
+        # Após reload do Streamlit, isinstance pode falhar entre cópias da mesma classe.
+        if isinstance(raw, TextDiffHunk):
+            hunk = raw
+        elif hasattr(raw, "model_dump"):
+            hunk = TextDiffHunk.model_validate(raw.model_dump())
+        else:
+            hunk = TextDiffHunk.model_validate(raw)
+        loc_hint = ""
+        if hunk.locations_new:
+            loc_hint = f" — revisada {location_label(hunk.locations_new[0])}"
+        elif hunk.locations_base:
+            loc_hint = f" — base {location_label(hunk.locations_base[0])}"
+        with st.expander(f"Bloco {i} [{hunk.change_type}]{loc_hint}", expanded=i <= 2):
+            st.markdown(format_hunk_block_with_location(hunk, index=i))
+            if path_new and hunk.locations_new:
+                render_document_navigator(
+                    path_new,
+                    path_new_type,
+                    excerpt_locations=hunk.locations_new,
+                    key_prefix=f"{key_prefix}_new_{hunk.hunk_id}",
+                )
+            elif path_base and hunk.locations_base:
+                render_document_navigator(
+                    path_base,
+                    path_base_type,
+                    excerpt_locations=hunk.locations_base,
+                    key_prefix=f"{key_prefix}_base_{hunk.hunk_id}",
                 )
 
 
@@ -507,16 +736,32 @@ def render_verification_results(
                     key=f"{key_prefix}_rf_{rev.comment_id}",
                 )
                 if st.button("➕ Incluir reforço na versão nova", key=f"{key_prefix}_add_rf_{rev.comment_id}"):
-                    add_comment_draft(
-                        new_bundle,
-                        comment_text=edited,
-                        anchor_text=rev.referenced_excerpt or rev.change_found,
-                        source=DocumentCommentSource.REINFORCEMENT,
-                        source_ref=rev.comment_id,
-                        file_path=new_file_path,
-                    )
-                    st.success("Reforço adicionado à lista da versão nova.")
-                    st.rerun()
+                    try:
+                        from types import SimpleNamespace
+
+                        ver = SimpleNamespace(
+                            id=new_bundle.version_id,
+                            contract_id=new_bundle.contract_id,
+                            file_path=new_file_path,
+                        )
+                        apply_quick_comment_to_version(
+                            ver,
+                            comment_text=edited,
+                            anchor_text=rev.referenced_excerpt or rev.change_found,
+                            locations=rev.locations,
+                            source_ref=rev.comment_id,
+                        )
+                        st.session_state["bgf_show_save_cta"] = new_bundle.version_id
+                        try:
+                            from app.utils.comment_balloons import close_comment_modal_overlay
+
+                            close_comment_modal_overlay()
+                        except Exception:
+                            pass
+                        st.success("Reforço gravado no arquivo. Salve o documento com o botão abaixo.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(str(exc))
 
             if rev.locations and new_file_path:
                 render_document_navigator(
@@ -525,6 +770,24 @@ def render_verification_results(
                     excerpt_locations=rev.locations,
                     key_prefix=f"{key_prefix}_loc_{rev.comment_id}",
                 )
+
+    from types import SimpleNamespace
+
+    from app.utils.export_ui import get_annotated_work_path, render_prominent_save_cta
+
+    ver = SimpleNamespace(
+        id=new_bundle.version_id,
+        contract_id=new_bundle.contract_id,
+        file_path=new_file_path,
+    )
+    if get_annotated_work_path(ver) or st.session_state.get("bgf_show_save_cta") == new_bundle.version_id:
+        st.divider()
+        st.markdown("### 💾 Salvar arquivo comentado")
+        render_prominent_save_cta(
+            ver,
+            key_prefix=f"{key_prefix}_save",
+            message="Use o botão abaixo para salvar o documento comentado no seu computador.",
+        )
 
 
 def render_comments_panel(
@@ -537,53 +800,12 @@ def render_comments_panel(
     key_prefix: str = "cmt",
 ) -> DocumentCommentsBundle:
     """
-    Painel completo: manual, extração, sugestões, lista, salvar no arquivo e download.
+    Lista de comentários, sugestões da análise e exportação.
+    Entrada manual removida — use o workspace inline (clique no documento).
     """
-    section_title("Comentários de revisão no documento")
-    st.caption(
-        "Insira comentários fixados no PDF/DOCX pedindo alterações. "
-        "Na comparação de versões, o sistema verifica se os comentários da versão base foram atendidos."
-    )
-
     bundle = get_comments_bundle(version.id, version.contract_id)
     file_path = version.file_path
     file_type = version.file_type
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("📎 Ler comentários já existentes no arquivo", key=f"{key_prefix}_load_file"):
-            n = load_comments_from_file(bundle, file_path)
-            st.success(f"{n} comentário(s) importado(s) do documento.") if n else st.warning(
-                "Nenhum comentário nativo encontrado no arquivo."
-            )
-            st.rerun()
-    with col_b:
-        if bundle.comments and st.button("🗑️ Limpar lista", key=f"{key_prefix}_clear"):
-            bundle.comments = []
-            _save_bundle(bundle)
-            st.rerun()
-
-    st.markdown("**Novo comentário**")
-    anchor_in = st.text_input(
-        "Trecho do contrato (âncora)",
-        key=f"{key_prefix}_anchor",
-        placeholder="Cole o trecho que deve ser alterado",
-    )
-    text_in = st.text_area(
-        "Texto do comentário",
-        key=f"{key_prefix}_text",
-        height=90,
-        placeholder="Solicitar alteração, inclusão ou correção…",
-    )
-    if st.button("Adicionar comentário", key=f"{key_prefix}_add_manual") and text_in.strip():
-        add_comment_draft(
-            bundle,
-            comment_text=text_in,
-            anchor_text=anchor_in or None,
-            file_path=file_path,
-        )
-        st.success("Adicionado.")
-        st.rerun()
 
     render_comment_suggestions(
         bundle,
@@ -608,8 +830,23 @@ def render_comments_panel(
 
     if bundle.comments:
         st.divider()
-        st.markdown(f"**Lista ({len(bundle.comments)} comentário(s))**")
-        for i, draft in enumerate(bundle.comments):
+        search = st.text_input(
+            "Buscar comentário (Ctrl+F)",
+            key=f"{key_prefix}_search",
+            placeholder="Filtrar por texto, status ou âncora…",
+        )
+        q = search.strip().lower()
+        filtered = bundle.comments
+        if q:
+            filtered = [
+                d
+                for d in bundle.comments
+                if q in d.comment_text.lower()
+                or q in (d.anchor_text or "").lower()
+                or q in d.source.value.lower()
+            ]
+        st.markdown(f"**Lista ({len(filtered)}/{len(bundle.comments)} comentário(s))**")
+        for i, draft in enumerate(filtered):
             src_label = draft.source.value.replace("_", " ")
             with st.expander(f"[{src_label}] {draft.comment_text[:70]}…"):
                 edited = st.text_area(
@@ -677,6 +914,6 @@ def render_comments_panel(
             st.success("Lista de comentários salva no histórico.")
 
     else:
-        st.caption("Nenhum comentário na lista. Use sugestões da análise ou adicione manualmente.")
+        st.caption("Nenhum comentário na lista. Use as sugestões da análise ou comente no documento.")
 
     return bundle

@@ -1,0 +1,6 @@
+# Monta dados em pasta local ./data (facilita backup no servidor)
+# Uso: docker compose -f docker-compose.yml -f docker-compose.bind-mount.yml up -d
+services:
+  contract-analyzer:
+    volumes:
+      - ./data:/app/data

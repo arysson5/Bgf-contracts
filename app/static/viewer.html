@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BGF — Viewer lado a lado (placeholder)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; background: #f4f7fb; color: #0d2137; }
+    header { background: #0a3d7a; color: #fff; padding: 12px 20px; }
+    header h1 { margin: 0; font-size: 1.1rem; }
+    .wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px; min-height: 80vh; }
+    .panel { background: #fff; border: 1px solid #d6e2f0; border-radius: 8px; padding: 12px; }
+    .panel h2 { margin: 0 0 8px; font-size: 0.95rem; color: #0a3d7a; }
+    .placeholder { min-height: 60vh; display: flex; align-items: center; justify-content: center;
+      color: #5a6b7d; border: 2px dashed #d6e2f0; border-radius: 6px; text-align: center; padding: 24px; }
+    footer { text-align: center; font-size: 0.75rem; color: #5a6b7d; padding: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>BGF Contract Analyzer — Visualização lado a lado</h1>
+  </header>
+  <div class="wrap">
+    <div class="panel">
+      <h2>Versão base</h2>
+      <div class="placeholder">
+        Placeholder PDF.js — integre com <code>/api/document/{caminho}</code>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Versão revisada</h2>
+      <div class="placeholder">
+        Placeholder PDF.js — use parâmetros de URL para carregar os dois PDFs
+      </div>
+    </div>
+  </div>
+  <footer>Contract Analyzer · API FastAPI em <code>/health</code> e <code>/api/text-diff</code></footer>
+</body>
+</html>

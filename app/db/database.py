@@ -9,12 +9,14 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from app.db.models import (
     AnalysisResult,
+    CommentRecord,
     Contract,
     ContractVersion,
     MatrixItem,
     MatrixTemplate,
     Requirement,
     RequirementTemplate,
+    User,
     utc_now,
 )
 from app.models.schemas import DocumentType
@@ -51,7 +53,23 @@ __all__ = [
     "load_analysis_json",
     "get_analysis_by_id",
     "get_analyses_for_contract",
+    "delete_analysis_result",
     "get_contracts_by_client",
+    "create_user",
+    "get_user_by_email",
+    "get_user_by_id",
+    "list_users",
+    "update_user",
+    "update_user_password",
+    "delete_user",
+    "count_admin_users",
+    "count_contracts_for_user",
+    "ensure_default_admin_user",
+    "save_comment_record",
+    "get_comment_records",
+    "get_comments_by_stable_ids",
+    "set_comment_quick_applied",
+    "delete_comment_records_for_version",
     "create_requirement_template",
     "add_requirement",
     "get_templates",
@@ -90,6 +108,10 @@ def init_db(*, force: bool = False) -> None:
     engine = get_engine()
     SQLModel.metadata.create_all(engine)
     _migrate_contract_proposal_columns(engine)
+    _migrate_owner_user_id(engine)
+    _migrate_user_admin_columns(engine)
+    admin = ensure_default_admin_user()
+    _migrate_contracts_to_admin(engine, admin.id)
     _seed_default_template()
     _seed_default_matrix()
     _db_ready = True
@@ -110,6 +132,52 @@ def _migrate_contract_proposal_columns(engine) -> None:
                 conn.commit()
             except Exception:
                 pass
+
+
+def _migrate_owner_user_id(engine) -> None:
+    with engine.connect() as conn:
+        try:
+            conn.execute(text("ALTER TABLE contract ADD COLUMN owner_user_id TEXT"))
+            conn.commit()
+        except Exception:
+            pass
+
+
+def _migrate_user_admin_columns(engine) -> None:
+    columns = [
+        ("is_admin", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_active", "INTEGER NOT NULL DEFAULT 1"),
+    ]
+    with engine.connect() as conn:
+        for name, ddl in columns:
+            try:
+                conn.execute(text(f'ALTER TABLE user ADD COLUMN {name} {ddl}'))
+                conn.commit()
+            except Exception:
+                pass
+        import os
+
+        admin_email = os.environ.get("BGF_DEFAULT_ADMIN_EMAIL", "admin@bgf.local").strip().lower()
+        try:
+            conn.execute(
+                text("UPDATE user SET is_admin = 1 WHERE email = :email"),
+                {"email": admin_email},
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+
+def _migrate_contracts_to_admin(engine, admin_id: str) -> None:
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                text("UPDATE contract SET owner_user_id = :uid WHERE owner_user_id IS NULL"),
+                {"uid": admin_id},
+            )
+            conn.commit()
+        except Exception:
+            pass
 
 
 def _seed_default_template() -> None:
@@ -198,10 +266,151 @@ def get_session() -> Session:
     return Session(get_engine())
 
 
+# --- CRUD Usuários ---
+
+def create_user(
+    email: str,
+    password_hash: str,
+    name: str = "",
+    *,
+    is_admin: bool = False,
+    is_active: bool = True,
+) -> User:
+    normalized = email.strip().lower()
+    if get_user_by_email(normalized):
+        raise ValueError(f"E-mail já cadastrado: {normalized}")
+    user = User(
+        email=normalized,
+        password_hash=password_hash,
+        name=name.strip(),
+        is_admin=is_admin,
+        is_active=is_active,
+    )
+    with get_session() as session:
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    return user
+
+
+def list_users() -> list[User]:
+    with get_session() as session:
+        return list(session.exec(select(User).order_by(User.created_at)).all())
+
+
+def update_user(
+    user_id: str,
+    *,
+    email: str | None = None,
+    name: str | None = None,
+    is_admin: bool | None = None,
+    is_active: bool | None = None,
+) -> User | None:
+    with get_session() as session:
+        user = session.get(User, user_id)
+        if not user:
+            return None
+        if email is not None:
+            normalized = email.strip().lower()
+            other = session.exec(select(User).where(User.email == normalized)).first()
+            if other and other.id != user_id:
+                raise ValueError(f"E-mail já cadastrado: {normalized}")
+            user.email = normalized
+        if name is not None:
+            user.name = name.strip()
+        if is_admin is not None:
+            user.is_admin = is_admin
+        if is_active is not None:
+            user.is_active = is_active
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user
+
+
+def update_user_password(user_id: str, password_hash: str) -> bool:
+    with get_session() as session:
+        user = session.get(User, user_id)
+        if not user:
+            return False
+        user.password_hash = password_hash
+        session.add(user)
+        session.commit()
+        return True
+
+
+def count_admin_users() -> int:
+    with get_session() as session:
+        rows = session.exec(select(User).where(User.is_admin == True)).all()  # noqa: E712
+        return len(list(rows))
+
+
+def count_contracts_for_user(user_id: str) -> int:
+    with get_session() as session:
+        rows = session.exec(
+            select(Contract).where(Contract.owner_user_id == user_id)
+        ).all()
+        return len(list(rows))
+
+
+def delete_user(user_id: str, *, current_user_id: str | None = None) -> None:
+    user = get_user_by_id(user_id)
+    if not user:
+        raise ValueError("Usuário não encontrado.")
+    if current_user_id and user_id == current_user_id:
+        raise ValueError("Você não pode excluir seu próprio usuário.")
+    if user.is_admin and count_admin_users() <= 1:
+        raise ValueError("Não é possível excluir o último administrador.")
+    if count_contracts_for_user(user_id) > 0:
+        raise ValueError(
+            "Usuário possui contratos vinculados. Transfira ou exclua os contratos antes."
+        )
+    with get_session() as session:
+        db_user = session.get(User, user_id)
+        if not db_user:
+            raise ValueError("Usuário não encontrado.")
+        session.delete(db_user)
+        session.commit()
+
+
+def get_user_by_email(email: str) -> User | None:
+    with get_session() as session:
+        return session.exec(
+            select(User).where(User.email == email.strip().lower())
+        ).first()
+
+
+def get_user_by_id(user_id: str) -> User | None:
+    with get_session() as session:
+        return session.get(User, user_id)
+
+
+def ensure_default_admin_user() -> User:
+    """Cria usuário admin padrão se não existir."""
+    import os
+
+    from app.utils.auth import hash_password
+
+    email = os.environ.get("BGF_DEFAULT_ADMIN_EMAIL", "admin@bgf.local").strip().lower()
+    existing = get_user_by_email(email)
+    if existing:
+        if not existing.is_admin:
+            update_user(existing.id, is_admin=True)
+            existing = get_user_by_id(existing.id)
+        return existing
+    password = os.environ.get("BGF_DEFAULT_ADMIN_PASSWORD", "admin123")
+    return create_user(
+        email,
+        hash_password(password),
+        name="Administrador",
+        is_admin=True,
+    )
+
+
 # --- CRUD Contratos ---
 
-def create_contract(name: str, client_name: str) -> Contract:
-    contract = Contract(name=name, client_name=client_name)
+def create_contract(name: str, client_name: str, owner_user_id: str | None = None) -> Contract:
+    contract = Contract(name=name, client_name=client_name, owner_user_id=owner_user_id)
     with get_session() as session:
         session.add(contract)
         session.commit()
@@ -209,14 +418,20 @@ def create_contract(name: str, client_name: str) -> Contract:
     return contract
 
 
-def get_contract(contract_id: str) -> Contract | None:
+def get_contract(contract_id: str, owner_user_id: str | None = None) -> Contract | None:
     with get_session() as session:
-        return session.get(Contract, contract_id)
+        contract = session.get(Contract, contract_id)
+        if contract and owner_user_id and contract.owner_user_id != owner_user_id:
+            return None
+        return contract
 
 
-def get_contracts() -> list[Contract]:
+def get_contracts(owner_user_id: str | None = None) -> list[Contract]:
     with get_session() as session:
-        return list(session.exec(select(Contract).order_by(Contract.updated_at.desc())).all())
+        stmt = select(Contract).order_by(Contract.updated_at.desc())
+        if owner_user_id:
+            stmt = stmt.where(Contract.owner_user_id == owner_user_id)
+        return list(session.exec(stmt).all())
 
 
 def update_contract_timestamp(contract_id: str) -> None:
@@ -362,6 +577,16 @@ def get_analysis_by_id(analysis_id: str) -> AnalysisResult | None:
         return session.get(AnalysisResult, analysis_id)
 
 
+def delete_analysis_result(analysis_id: str) -> bool:
+    with get_session() as session:
+        record = session.get(AnalysisResult, analysis_id)
+        if not record:
+            return False
+        session.delete(record)
+        session.commit()
+        return True
+
+
 def get_analyses_for_contract(contract_id: str) -> list[tuple[AnalysisResult, ContractVersion]]:
     """Retorna análises salvas de todas as versões do contrato."""
     versions = get_versions(contract_id)
@@ -374,14 +599,105 @@ def get_analyses_for_contract(contract_id: str) -> list[tuple[AnalysisResult, Co
     return results
 
 
-def get_contracts_by_client(client_name: str) -> list[Contract]:
+def get_contracts_by_client(client_name: str, owner_user_id: str | None = None) -> list[Contract]:
     with get_session() as session:
-        rows = session.exec(
+        stmt = (
             select(Contract)
             .where(Contract.client_name.contains(client_name))
             .order_by(Contract.updated_at.desc())
+        )
+        if owner_user_id:
+            stmt = stmt.where(Contract.owner_user_id == owner_user_id)
+        return list(session.exec(stmt).all())
+
+
+# --- CRUD Comentários persistidos ---
+
+def save_comment_record(
+    version_id: str,
+    stable_id: str,
+    comment_text: str,
+    *,
+    anchor_text: str = "",
+    source: str = "extracted",
+    page_hint: str = "",
+    parent_comment_id: str | None = None,
+) -> CommentRecord:
+    with get_session() as session:
+        existing = session.exec(
+            select(CommentRecord).where(
+                CommentRecord.version_id == version_id,
+                CommentRecord.stable_id == stable_id,
+            )
+        ).first()
+        if existing:
+            existing.comment_text = comment_text
+            existing.anchor_text = anchor_text
+            existing.source = source
+            existing.page_hint = page_hint
+            if parent_comment_id:
+                existing.parent_comment_id = parent_comment_id
+            session.add(existing)
+            session.commit()
+            session.refresh(existing)
+            return existing
+        record = CommentRecord(
+            version_id=version_id,
+            stable_id=stable_id,
+            comment_text=comment_text,
+            anchor_text=anchor_text,
+            source=source,
+            page_hint=page_hint,
+            parent_comment_id=parent_comment_id,
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return record
+
+
+def get_comment_records(version_id: str) -> list[CommentRecord]:
+    with get_session() as session:
+        rows = session.exec(
+            select(CommentRecord)
+            .where(CommentRecord.version_id == version_id)
+            .order_by(CommentRecord.created_at)
         ).all()
         return list(rows)
+
+
+def get_comments_by_stable_ids(stable_ids: list[str]) -> list[CommentRecord]:
+    if not stable_ids:
+        return []
+    with get_session() as session:
+        rows = session.exec(
+            select(CommentRecord).where(CommentRecord.stable_id.in_(stable_ids))
+        ).all()
+        return list(rows)
+
+
+def set_comment_quick_applied(version_id: str, stable_id: str, applied: bool = True) -> None:
+    with get_session() as session:
+        row = session.exec(
+            select(CommentRecord).where(
+                CommentRecord.version_id == version_id,
+                CommentRecord.stable_id == stable_id,
+            )
+        ).first()
+        if row:
+            row.quick_applied = applied
+            session.add(row)
+            session.commit()
+
+
+def delete_comment_records_for_version(version_id: str) -> None:
+    with get_session() as session:
+        rows = session.exec(
+            select(CommentRecord).where(CommentRecord.version_id == version_id)
+        ).all()
+        for row in rows:
+            session.delete(row)
+        session.commit()
 
 
 # --- CRUD Templates ---

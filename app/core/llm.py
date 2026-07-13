@@ -26,7 +26,20 @@ def resolve_model_name(name: str) -> str:
     return resolved
 
 
-def get_llm(temperature: float = 0, max_output_tokens: int | None = None) -> ChatGoogleGenerativeAI:
+def get_llm_pro(
+    temperature: float = 0,
+    max_output_tokens: int | None = None,
+) -> ChatGoogleGenerativeAI:
+    """Modelo Pro (criteriosa) — usa MODEL_NAME_PRO ou fallback para MODEL_NAME."""
+    return get_llm(temperature=temperature, max_output_tokens=max_output_tokens, use_pro=True)
+
+
+def get_llm(
+    temperature: float = 0,
+    max_output_tokens: int | None = None,
+    *,
+    use_pro: bool = False,
+) -> ChatGoogleGenerativeAI:
     from app.utils.windows_runtime import ensure_runtime_ok
 
     ensure_runtime_ok()
@@ -35,7 +48,11 @@ def get_llm(temperature: float = 0, max_output_tokens: int | None = None) -> Cha
         raise ValueError(
             "GOOGLE_API_KEY não configurada. Copie .env.example para .env e defina sua chave."
         )
-    model = resolve_model_name(settings.model_name)
+    if use_pro and settings.model_name_pro.strip():
+        raw_name = settings.model_name_pro.strip()
+    else:
+        raw_name = settings.model_name
+    model = resolve_model_name(raw_name)
     return ChatGoogleGenerativeAI(
         model=model,
         google_api_key=settings.google_api_key,

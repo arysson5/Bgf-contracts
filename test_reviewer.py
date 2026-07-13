@@ -1,7 +1,7 @@
 """Testa revisão de comentários — requer GOOGLE_API_KEY."""
 
-from app.core.differ import compare_versions
 from app.core.reviewer import review_comments
+from app.core.text_diff import compute_text_diff
 
 TEXT_ORIGINAL = """
 Cláusula 3 - Pagamento
@@ -43,8 +43,8 @@ COMMENTS = [
 
 
 def main() -> None:
-    diff = compare_versions(TEXT_ORIGINAL, TEXT_NEW, "Original", "Nova", "test")
-    result = review_comments(COMMENTS, TEXT_ORIGINAL, TEXT_NEW, diff, "test")
+    text_diff = compute_text_diff(TEXT_ORIGINAL, TEXT_NEW, contract_id="test")
+    result = review_comments(COMMENTS, TEXT_ORIGINAL, TEXT_NEW, text_diff, "test")
     print(result.admin_summary)
     for r in result.reviews:
         print(f"\n[{r.status.value}] {r.original_comment}")

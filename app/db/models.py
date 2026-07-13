@@ -24,12 +24,43 @@ class Contract(SQLModel, table=True):
     id: str = Field(primary_key=True, default_factory=new_id)
     name: str
     client_name: str
+    owner_user_id: str | None = Field(default=None, foreign_key="user.id", index=True)
     proposal_file_path: str = ""
     proposal_file_type: str = ""
     proposal_extracted_text: str = ""
     proposal_label: str = "Proposta comercial"
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class User(SQLModel, table=True):
+    __tablename__ = "user"
+    __table_args__ = _TABLE_ARGS
+
+    id: str = Field(primary_key=True, default_factory=new_id)
+    email: str = Field(index=True, unique=True)
+    password_hash: str
+    name: str = ""
+    is_admin: bool = Field(default=False)
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CommentRecord(SQLModel, table=True):
+    """Comentário persistido com ID estável entre análises."""
+    __tablename__ = "comment"
+    __table_args__ = _TABLE_ARGS
+
+    id: str = Field(primary_key=True, default_factory=new_id)
+    version_id: str = Field(foreign_key="contract_version.id", index=True)
+    stable_id: str = Field(index=True)
+    parent_comment_id: str | None = Field(default=None, index=True)
+    comment_text: str = ""
+    anchor_text: str = ""
+    source: str = "extracted"
+    page_hint: str = ""
+    quick_applied: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class ContractVersion(SQLModel, table=True):

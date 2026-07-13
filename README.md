@@ -52,6 +52,63 @@ streamlit run app/main.py
 
 Acesse: http://127.0.0.1:8501 (somente nesta máquina, por padrão).
 
+## Docker (servidor / produção)
+
+Encapsula app, Python e dependências em um container Linux. Banco e contratos ficam em **volume persistente**.
+
+### Pré-requisitos
+
+- [Docker Engine](https://docs.docker.com/engine/install/) ou Docker Desktop (Windows)
+- Arquivo `.env` com `GOOGLE_API_KEY`
+
+### Subir em 3 passos
+
+```bash
+copy .env.docker.example .env    # Windows
+# cp .env.docker.example .env      # Linux
+
+# Edite .env e coloque sua GOOGLE_API_KEY
+
+docker compose up -d --build
+```
+
+Acesse: **http://localhost:8501** (ou a porta definida em `APP_PORT` no `.env`).
+
+**Windows (atalho):**
+
+```powershell
+.\scripts\docker-up.ps1
+```
+
+**Linux/macOS:**
+
+```bash
+chmod +x scripts/docker-up.sh
+./scripts/docker-up.sh
+```
+
+### Dados persistentes
+
+Por padrão o Docker cria o volume nomeado `bgf-contract-analyzer-data` (banco + PDFs).
+
+Para gravar em pasta local `./data` (backup mais fácil no servidor):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.bind-mount.yml up -d --build
+```
+
+### Comandos úteis
+
+```bash
+docker compose logs -f          # acompanhar logs
+docker compose down             # parar
+docker compose up -d --build    # atualizar após git pull
+```
+
+### Publicar na rede (VPN / IIS)
+
+O container escuta em `0.0.0.0:8501`. No servidor, use proxy reverso (IIS/nginx) com HTTPS na frente da porta mapeada — não exponha diretamente na internet sem autenticação.
+
 ## Publicar no GitHub — checklist
 
 Antes do primeiro `git push`, confirme:

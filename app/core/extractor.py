@@ -1,5 +1,6 @@
 """Extração de texto de PDF e DOCX e comentários de PDF."""
 
+import hashlib
 import re
 import uuid
 from pathlib import Path
@@ -11,6 +12,33 @@ from docx import Document as DocxDocument
 from loguru import logger
 
 from app.models.schemas import DocumentType
+
+
+def compute_comment_stable_id(
+    file_path: str,
+    *,
+    page: int | str = "",
+    author: str = "",
+    comment_text: str = "",
+    referenced_text: str = "",
+    date_str: str = "",
+    paragraph_index: int | None = None,
+) -> str:
+    """ID estável para vincular comentários entre versões e análises."""
+    name = Path(file_path).name
+    blob = "|".join([
+        name,
+        str(page),
+        str(paragraph_index or ""),
+        author.strip(),
+        comment_text.strip()[:500],
+        referenced_text.strip()[:200],
+        date_str.strip(),
+    ])
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+stable_comment_id = compute_comment_stable_id
 
 
 def normalize_text(text: str) -> str:
@@ -245,15 +273,34 @@ def extract_comments_from_pdf(file_path: str) -> list[dict]:
                 referenced = _referenced_text_from_annot(page, annot, comment_text)
                 type_name = _annot_type_name(annot)
 
+                author = info.get("title") or info.get("author") or "Desconhecido"
+                page_num = page_index + 1
+                stable_id = compute_comment_stable_id(
+                    file_path,
+                    page=page_num,
+                    author=author,
+                    comment_text=comment_text,
+                    referenced_text=referenced,
+                    date_str=info.get("modDate") or info.get("creationDate") or "",
+                )
                 comments.append(
                     {
-                        "id": str(uuid.uuid4()),
-                        "page": page_index + 1,
+                        "id": stable_id,
+                        "stable_id": stable_id,
+                        "page": page_num,
                         "comment_text": comment_text,
                         "referenced_text": referenced,
-                        "author": info.get("title") or info.get("author") or "Desconhecido",
+                        "author": author,
                         "date": info.get("modDate") or info.get("creationDate") or "",
                         "annot_type": type_name,
+                        "rects": [
+                            {
+                                "x0": round(rect.x0, 2),
+                                "y0": round(rect.y0, 2),
+                                "x1": round(rect.x1, 2),
+                                "y1": round(rect.y1, 2),
+                            }
+                        ],
                     }
                 )
     finally:

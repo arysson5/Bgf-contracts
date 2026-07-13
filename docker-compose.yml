@@ -1,0 +1,29 @@
+# Contract Analyzer — uso: copie .env.docker.example para .env e execute docker compose up -d
+services:
+  contract-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bgf-contract-analyzer:latest
+    container_name: bgf-contract-analyzer
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8501}:8501"
+    env_file:
+      - .env
+    environment:
+      CONTRACTS_DIR: /app/data/contracts
+      DB_PATH: /app/data/contract_analyzer.db
+    volumes:
+      # Banco SQLite + PDFs/DOCX persistem fora do container
+      - contract-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  contract-data:
+    name: bgf-contract-analyzer-data

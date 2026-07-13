@@ -12,12 +12,39 @@ MODE_MATRIX_SAVED = "📁 Contrato salvo + proposta"
 MODE_COMPARE_QUICK = "📎 Upload rápido (sem salvar)"
 MODE_MATRIX_QUICK = "📎 Upload rápido (sem salvar)"
 
+_UPLOAD_VERSION_LABEL_KEY = "upload_version_label"
+_UPLOAD_VERSION_LABEL_DEFAULT_KEY = "upload_version_label_default"
+
+
+def _prepare_upload_version_label(default: str) -> None:
+    """
+    Atualiza a sugestão do label e reseta o widget.
+
+    Só pode ser chamado antes de instanciar st.text_input(key=upload_version_label).
+    """
+    st.session_state[_UPLOAD_VERSION_LABEL_DEFAULT_KEY] = default
+    st.session_state.pop(_UPLOAD_VERSION_LABEL_KEY, None)
+
+
+def init_upload_version_label_widget() -> None:
+    """Inicializa o widget do label após apply_active_contract (antes do text_input)."""
+    if _UPLOAD_VERSION_LABEL_KEY not in st.session_state:
+        st.session_state[_UPLOAD_VERSION_LABEL_KEY] = st.session_state.get(
+            _UPLOAD_VERSION_LABEL_DEFAULT_KEY, "Original"
+        )
+
+
+def _owner_user_id() -> str | None:
+    from app.utils.auth import get_current_user_id
+
+    return get_current_user_id()
+
 
 def get_active_contract() -> Contract | None:
     cid = st.session_state.get("active_contract_id")
     if not cid:
         return None
-    return db.get_contract(cid)
+    return db.get_contract(cid, owner_user_id=_owner_user_id())
 
 
 def get_active_versions() -> list[ContractVersion]:
@@ -51,7 +78,7 @@ def apply_active_contract(contract_id: str | None, *, force: bool = False) -> bo
             if ver and ver.contract_id == contract_id:
                 return True
 
-    contract = db.get_contract(contract_id)
+    contract = db.get_contract(contract_id, owner_user_id=_owner_user_id())
     if not contract:
         return False
 
@@ -72,8 +99,7 @@ def apply_active_contract(contract_id: str | None, *, force: bool = False) -> bo
         st.session_state.compare_new_idx = new_i
         st.session_state.mtx_contract_ver_idx = len(versions) - 1
         next_num = latest.version_number + 1
-        st.session_state["upload_version_label_default"] = f"Revisão v{next_num}"
-        st.session_state["upload_version_label"] = st.session_state["upload_version_label_default"]
+        _prepare_upload_version_label(f"Revisão v{next_num}")
     else:
         for key in (
             "upload_version_id",
@@ -86,8 +112,7 @@ def apply_active_contract(contract_id: str | None, *, force: bool = False) -> bo
         st.session_state.compare_base_idx = 0
         st.session_state.compare_new_idx = 0
         st.session_state.mtx_contract_ver_idx = 0
-        st.session_state["upload_version_label_default"] = "Original"
-        st.session_state["upload_version_label"] = "Original"
+        _prepare_upload_version_label("Original")
 
     st.session_state.compare_mode = MODE_COMPARE_SAVED
     st.session_state.matrix_mode = MODE_MATRIX_SAVED
@@ -141,7 +166,7 @@ def resolve_contract_for_upload(contract_name: str, client_name: str) -> tuple[s
     if active and contract_identity_matches(name, client, active):
         return active.id, False
 
-    contract = db.create_contract(name, client)
+    contract = db.create_contract(name, client, owner_user_id=_owner_user_id())
     st.session_state.active_contract_id = contract.id
     st.session_state._applied_contract_id = contract.id
     for key in (
@@ -152,8 +177,8 @@ def resolve_contract_for_upload(contract_name: str, client_name: str) -> tuple[s
         "last_checklist_result",
     ):
         st.session_state.pop(key, None)
-    st.session_state["upload_version_label_default"] = "Original"
-    st.session_state["upload_version_label"] = "Original"
+  # Não alterar upload_version_label aqui — o widget já pode estar instanciado.
+    st.session_state[_UPLOAD_VERSION_LABEL_DEFAULT_KEY] = "Original"
     from app.utils.data_cache import clear_data_cache
 
     clear_data_cache()
@@ -176,8 +201,7 @@ def clear_active_contract_context() -> None:
         "last_checklist_result",
     ):
         st.session_state.pop(key, None)
-    st.session_state["upload_version_label_default"] = "Original"
-    st.session_state["upload_version_label"] = "Original"
+    _prepare_upload_version_label("Original")
 
 
 def version_option_label(version: ContractVersion) -> str:

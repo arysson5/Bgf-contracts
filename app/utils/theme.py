@@ -31,9 +31,10 @@ def get_app_icon() -> str:
     if _APP_FAVICON_PNG.is_file():
         return str(_APP_FAVICON_PNG)
     return "📄"
-from app.utils.data_cache import cached_contracts
+from app.utils.data_cache import cached_contracts_for_session
 from app.utils.datetime_br import format_brazil_datetime
 from app.utils.active_contract import ensure_active_contract_applied, on_sidebar_contract_changed
+from app.utils.auth import is_admin, render_logout_button, require_login
 from app.utils.ui import init_session_state
 
 # Paleta corporativa
@@ -55,6 +56,7 @@ ANALYSIS_LABELS = {
     "checklist": "Checklist (requisitos)",
     "matrix_initial": "Análise inicial (parâmetros)",
     "diff": "Análise contratual",
+    "text_diff": "Comparar textos",
     "comments": "Revisão de comentários (legado)",
     "document_comments": "Comentários no documento",
     "matrix": "Proposta × Contrato",
@@ -409,9 +411,15 @@ div[data-testid="stAlert"]:has(svg[data-testid="stIcon"]) {{
 """
 
 
+_THEME_INJECTED_KEY = "_corp_theme_css_injected"
+
+
 def inject_corporate_theme() -> None:
-    """Injeta CSS corporativo a cada rerun (necessário ao trocar de página no multipage)."""
+    """Injeta CSS corporativo uma vez por sessão (evita erro removeChild no React)."""
+    if st.session_state.get(_THEME_INJECTED_KEY):
+        return
     st.markdown(CORPORATE_CSS, unsafe_allow_html=True)
+    st.session_state[_THEME_INJECTED_KEY] = True
 
 
 def setup_page(
@@ -420,6 +428,7 @@ def setup_page(
     page_icon: str | None = None,
     layout: str = "wide",
     with_sidebar: bool = True,
+    require_auth: bool = True,
 ) -> None:
     """Configura página Streamlit com tema e sidebar padronizados."""
     st.set_page_config(
@@ -430,6 +439,8 @@ def setup_page(
     init_session_state()
     db.init_db()
     inject_corporate_theme()
+    if require_auth:
+        require_login()
     if with_sidebar:
         render_app_sidebar()
         ensure_active_contract_applied()
@@ -476,7 +487,8 @@ def stat_cards(values: list[tuple[str, str | int]]) -> None:
 
 
 def section_title(text: str) -> None:
-    st.markdown(f'<p class="ca-section-title">{text}</p>', unsafe_allow_html=True)
+    """Título de seção — componente nativo (estável no DOM do Streamlit)."""
+    st.subheader(text)
 
 
 def activity_feed(records: list) -> None:
@@ -506,7 +518,7 @@ def render_app_sidebar() -> None:
         st.markdown("### Contract Analyzer")
         st.caption("Análise inteligente de contratos")
 
-        contracts = cached_contracts()
+        contracts = cached_contracts_for_session()
         if contracts:
             from app.utils.ui import _filter_contracts, _contract_label
 
@@ -549,5 +561,9 @@ def render_app_sidebar() -> None:
         st.page_link("pages/01_upload.py", label="Upload & Análise inicial")
         st.page_link("pages/02_compare.py", label="Comparar versões")
         st.page_link("pages/04_history.py", label="Histórico")
+        if is_admin():
+            st.page_link("pages/05_users.py", label="Usuários")
+        st.divider()
+        render_logout_button()
         st.divider()
         st.caption("Powered by Google Gemini")

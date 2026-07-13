@@ -3,7 +3,9 @@
 import html
 import re
 import uuid
+import xml.etree.ElementTree as ET
 from pathlib import Path
+from zipfile import ZipFile
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
@@ -12,6 +14,8 @@ from loguru import logger
 from rapidfuzz import fuzz
 
 from app.models.schemas import TextLocation
+
+_W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def find_text_in_docx(file_path: str, query: str, max_results: int = 5) -> list[TextLocation]:
@@ -104,22 +108,243 @@ def add_comment_to_docx(
     return str(dest)
 
 
-def extract_comments_from_docx(file_path: str) -> list[dict]:
-    """Extrai comentários nativos do DOCX (quando existirem no XML)."""
+def _para_plain_text(p_el: ET.Element) -> str:
+    parts: list[str] = []
+    for node in p_el.iter(f"{_W_NS}t"):
+        if node.text:
+            parts.append(node.text)
+        if node.tail:
+            parts.append(node.tail)
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def _iter_body_paragraphs(body: ET.Element):
+    """Parágrafos do corpo em ordem de documento (inclui células de tabela)."""
+
+    def walk_tbl(tbl: ET.Element):
+        for row in tbl.findall(f"./{_W_NS}tr"):
+            for cell in row.findall(f"./{_W_NS}tc"):
+                for el in list(cell):
+                    if el.tag == f"{_W_NS}p":
+                        yield el
+                    elif el.tag == f"{_W_NS}tbl":
+                        yield from walk_tbl(el)
+
+    for child in list(body):
+        if child.tag == f"{_W_NS}p":
+            yield child
+        elif child.tag == f"{_W_NS}tbl":
+            yield from walk_tbl(child)
+
+def iter_docx_paragraph_texts(file_path: str) -> list[str]:
+    """Lista de textos de parágrafo na mesma ordem da extração de comentários."""
+    path = Path(file_path)
+    if not path.exists():
+        return []
+    try:
+        with ZipFile(file_path) as zf:
+            if "word/document.xml" not in zf.namelist():
+                return []
+            doc_root = ET.fromstring(zf.read("word/document.xml"))
+            body = doc_root.find(f".//{_W_NS}body")
+            if body is None:
+                return []
+            return [_para_plain_text(p) for p in _iter_body_paragraphs(body)]
+    except Exception:
+        doc = Document(file_path)
+        return [p.text.strip() for p in doc.paragraphs]
+
+
+def _load_comment_meta(zf: ZipFile) -> dict[str, dict]:
+    if "word/comments.xml" not in zf.namelist():
+        return {}
+    root = ET.fromstring(zf.read("word/comments.xml"))
+    meta: dict[str, dict] = {}
+    for cmt_el in root.findall(f".//{_W_NS}comment"):
+        cid = cmt_el.get(f"{_W_NS}id")
+        if cid is None:
+            continue
+        author = cmt_el.get(f"{_W_NS}author") or "Desconhecido"
+        parts: list[str] = []
+        for t in cmt_el.iter(f"{_W_NS}t"):
+            if t.text:
+                parts.append(t.text)
+            if t.tail:
+                parts.append(t.tail)
+        meta[cid] = {"text": "".join(parts).strip(), "author": author}
+    return meta
+
+
+def _extract_docx_comments_from_xml(file_path: str) -> list[dict]:
+    """Extrai comentários com âncora real (commentRangeStart/End), inclusive em tabelas."""
+    from app.core.extractor import compute_comment_stable_id
+
     comments: list[dict] = []
+    try:
+        with ZipFile(file_path) as zf:
+            if "word/document.xml" not in zf.namelist():
+                return []
+            doc_root = ET.fromstring(zf.read("word/document.xml"))
+            comment_meta = _load_comment_meta(zf)
+            body = doc_root.find(f".//{_W_NS}body")
+            if body is None:
+                return []
+
+            para_idx = -1
+            active: dict[str, dict] = {}
+            closed_ids: set[str] = set()
+
+            for child in _iter_body_paragraphs(body):
+                para_idx += 1
+                para_text = _para_plain_text(child)
+
+                # Starts e ends no mesmo parágrafo: processar em ordem do XML
+                for node in child.iter():
+                    if node.tag == f"{_W_NS}commentRangeStart":
+                        cid = node.get(f"{_W_NS}id")
+                        if cid and cid not in closed_ids:
+                            active[cid] = {"start_para": para_idx, "texts": []}
+                    elif node.tag == f"{_W_NS}commentRangeEnd":
+                        cid = node.get(f"{_W_NS}id")
+                        if cid not in active:
+                            continue
+                        data = active.pop(cid)
+                        if para_text and para_idx >= data["start_para"]:
+                            # garante o parágrafo do end na âncora
+                            if not data["texts"] or data["texts"][-1] != para_text:
+                                data["texts"].append(para_text)
+                        referenced = " ".join(data["texts"]).strip()
+                        meta = comment_meta.get(cid, {})
+                        text = meta.get("text", "")
+                        author = meta.get("author", "Desconhecido")
+                        start_para = data["start_para"]
+                        stable_id = compute_comment_stable_id(
+                            file_path,
+                            page=start_para + 1,
+                            author=author,
+                            comment_text=text,
+                            referenced_text=referenced,
+                            paragraph_index=start_para,
+                        )
+                        comments.append(
+                            {
+                                "id": stable_id,
+                                "stable_id": stable_id,
+                                "page": start_para + 1,
+                                "comment_text": text,
+                                "referenced_text": referenced,
+                                "author": author,
+                                "date": "",
+                                "paragraph_index": start_para,
+                                "word_comment_id": cid,
+                            }
+                        )
+                        closed_ids.add(cid)
+
+                # Acumula texto nos ranges abertos (após processar starts deste parágrafo)
+                for data in active.values():
+                    if para_text and para_idx >= data["start_para"]:
+                        if not data["texts"] or data["texts"][-1] != para_text:
+                            data["texts"].append(para_text)
+
+            # Comentários com range open (malformado): ainda inclui pelo meta
+            for cid, data in list(active.items()):
+                if cid in closed_ids:
+                    continue
+                meta = comment_meta.get(cid, {})
+                text = meta.get("text", "")
+                if not text.strip():
+                    continue
+                author = meta.get("author", "Desconhecido")
+                start_para = data["start_para"]
+                referenced = " ".join(data["texts"]).strip()
+                stable_id = compute_comment_stable_id(
+                    file_path,
+                    page=start_para + 1,
+                    author=author,
+                    comment_text=text,
+                    referenced_text=referenced,
+                    paragraph_index=start_para,
+                )
+                comments.append(
+                    {
+                        "id": stable_id,
+                        "stable_id": stable_id,
+                        "page": start_para + 1,
+                        "comment_text": text,
+                        "referenced_text": referenced,
+                        "author": author,
+                        "date": "",
+                        "paragraph_index": start_para,
+                        "word_comment_id": cid,
+                    }
+                )
+
+            # Garante 100% de cobertura: meta em comments.xml sem âncora visitada
+            seen_ids = {c.get("word_comment_id") for c in comments}
+            for cid, meta in comment_meta.items():
+                if cid in seen_ids:
+                    continue
+                text = meta.get("text", "")
+                if not text.strip():
+                    continue
+                author = meta.get("author", "Desconhecido")
+                stable_id = compute_comment_stable_id(
+                    file_path,
+                    page=1,
+                    author=author,
+                    comment_text=text,
+                    paragraph_index=None,
+                )
+                comments.append(
+                    {
+                        "id": stable_id,
+                        "stable_id": stable_id,
+                        "page": 1,
+                        "comment_text": text,
+                        "referenced_text": "",
+                        "author": author,
+                        "date": "",
+                        "paragraph_index": None,
+                        "word_comment_id": cid,
+                    }
+                )
+    except Exception as exc:
+        logger.debug("XML de comentários DOCX: {}", exc)
+    return comments
+
+
+def extract_comments_from_docx(file_path: str) -> list[dict]:
+    """Extrai comentários nativos do DOCX com posição no parágrafo ancorado."""
+    from app.core.extractor import compute_comment_stable_id
+
+    comments = _extract_docx_comments_from_xml(file_path)
+    if comments:
+        logger.info("Extraídos {} comentário(s) DOCX (XML) de {}", len(comments), Path(file_path).name)
+        return comments
+
     try:
         doc = Document(file_path)
         if hasattr(doc, "comments") and doc.comments:
             for i, cmt in enumerate(doc.comments):
+                text = getattr(cmt, "text", str(cmt)) or ""
+                author = getattr(cmt, "author", "Desconhecido") or "Desconhecido"
+                stable_id = compute_comment_stable_id(
+                    file_path,
+                    page=i + 1,
+                    author=author,
+                    comment_text=text,
+                )
                 comments.append(
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": stable_id,
+                        "stable_id": stable_id,
                         "page": 1,
-                        "comment_text": getattr(cmt, "text", str(cmt)) or "",
+                        "comment_text": text,
                         "referenced_text": "",
-                        "author": getattr(cmt, "author", "Desconhecido") or "Desconhecido",
+                        "author": author,
                         "date": "",
-                        "paragraph_index": i,
+                        "paragraph_index": None,
                     }
                 )
     except Exception as exc:
