@@ -22,6 +22,7 @@ from app.models.schemas import (
     ContractDiffResult,
     ContractualChange,
     TextDiffHunk,
+    TextDiffResult,
 )
 from app.utils.helpers import chunk_text, count_tokens, safe_json_parse
 from app.utils.settings import get_settings
@@ -96,7 +97,7 @@ def validate_hunks_as_changes(
     *,
     similarity_score: float = 0.0,
 ) -> ContractDiffResult:
-    """Validação: regras sobre hunks — trechos devem existir nos textos (rapidfuzz ≥ 85)."""
+    """Fallback sem IA: keywords + fuzzy — usado se a validação com Gemini falhar."""
     changes: list[ContractualChange] = []
     warnings: list[str] = []
     invalid = 0
@@ -110,23 +111,32 @@ def validate_hunks_as_changes(
             invalid += 1
             warnings.append(f"Hunk {h.hunk_id}: trecho não validado no documento.")
 
+        legal = _hunk_has_legal_keyword(h)
         impact = (
-            "Trecho validado nos documentos."
-            if valid_a and valid_b
-            else "Trecho com baixa correspondência — revisar manualmente."
+            "Possível alteração material (termo jurídico detectado)."
+            if legal
+            else (
+                "Trecho validado nos documentos."
+                if valid_a and valid_b
+                else "Trecho com baixa correspondência — revisar manualmente."
+            )
         )
         changes.append(
             ContractualChange(
                 change_id=h.hunk_id,
                 category=_hunk_category(h.change_type),
-                clause_reference="Validação textual",
+                clause_reference="Validação pré-assinatura",
                 title=_hunk_title(h),
                 description=(h.text_b or h.text_a or "")[:800],
                 original_text=h.text_a,
                 new_text=h.text_b,
                 legal_impact=impact,
-                risk_level=ChangeRisk.HIGH if not (valid_a and valid_b) else ChangeRisk.LOW,
-                requires_attention=not (valid_a and valid_b),
+                risk_level=(
+                    ChangeRisk.HIGH
+                    if legal or not (valid_a and valid_b)
+                    else ChangeRisk.LOW
+                ),
+                requires_attention=legal or not (valid_a and valid_b),
             )
         )
 
@@ -137,6 +147,207 @@ def validate_hunks_as_changes(
         summary += " " + " ".join(warnings[:3])
 
     high = [c for c in changes if c.risk_level == ChangeRisk.HIGH]
+    material = [c for c in changes if c.requires_attention]
+    return ContractDiffResult(
+        contract_id=contract_id,
+        version_a_label=label_a,
+        version_b_label=label_b,
+        executive_summary=summary,
+        recommendation=recommendation,
+        material_changes_count=len(material),
+        high_risk_count=len(high),
+        has_significant_changes=bool(material),
+        contractual_changes=changes,
+        summary=summary,
+        similarity_score=similarity_score,
+    )
+
+
+class _SigningFlagLLM(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    hunk_id: str = ""
+    is_material: bool = False
+    risk_level: ChangeRisk = ChangeRisk.LOW
+    reason: str = ""
+    title: str = ""
+
+
+class _SigningValidationLLM(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    safe_to_sign: bool = True
+    executive_summary: str = ""
+    recommendation: str = ""
+    material_flags: list[_SigningFlagLLM] = Field(default_factory=list)
+
+
+SIGNING_VALIDATION_SYSTEM = """Você é advogado de contratos corporativos no Brasil.
+Cenário: as partes já acordaram o texto; uma versão chegou para ASSINATURA.
+Sua missão é só detectar se houve ALTERAÇÃO MATERIAL inserida em relação à versão anterior.
+Ignore formatação, espaços, tipografia, numeração cosméticas e correções ortográficas sem impacto.
+É material: obrigação, valor, prazo, multa, rescisão, foro, confidencialidade, responsabilidade,
+garantia, partes/qualificação, objeto, pagamento, indicação.
+Responda de forma objetiva para decisão de assinar ou não."""
+
+SIGNING_VALIDATION_USER = """Versão anterior (acordo): {label_a}
+Versão enviada para assinatura: {label_b}
+Similaridade textual: {similarity:.0%}
+
+ALTERAÇÕES DETECTADAS PELO DUMP TEXTUAL (hunks):
+{hunks_digest}
+
+Para cada alteração material, preencha material_flags com hunk_id, is_material=true, risk_level, reason e title curto.
+Se nada for material: safe_to_sign=true, material_flags vazio.
+executive_summary: 1-3 frases para o usuário jurídico.
+recommendation: "Pode assinar" ou o que revisar antes de assinar."""
+
+
+def _digest_hunks_for_signing(hunks: list[TextDiffHunk], *, max_hunks: int = 40) -> str:
+    parts: list[str] = []
+    changed = [h for h in hunks if h.change_type != "unchanged"][:max_hunks]
+    for i, h in enumerate(changed, 1):
+        a = (h.text_a or "(vazio)")[:900]
+        b = (h.text_b or "(vazio)")[:900]
+        parts.append(
+            f"[{h.hunk_id}] #{i} tipo={h.change_type}\n"
+            f"ANTES: {a}\nDEPOIS: {b}"
+        )
+    if not parts:
+        return "(nenhuma alteração de parágrafo)"
+    return "\n\n---\n\n".join(parts)
+
+
+def validate_signing_version(
+    hunks: list[TextDiffHunk],
+    text_a: str,
+    text_b: str,
+    label_a: str,
+    label_b: str,
+    contract_id: str,
+    *,
+    similarity_score: float = 0.0,
+    progress_callback: ProgressCallback | None = None,
+) -> ContractDiffResult:
+    """Validação pré-assinatura: diff + IA (flash) só para relevância material.
+
+    Não analisa comentários. Objetivo: ver se a versão para assinar diverge
+    de forma relevante do texto acordado.
+    """
+    changed = [h for h in hunks if h.change_type != "unchanged"]
+    if not changed:
+        return ContractDiffResult(
+            contract_id=contract_id,
+            version_a_label=label_a,
+            version_b_label=label_b,
+            executive_summary=(
+                "Nenhuma alteração textual entre a versão acordada e a enviada para assinatura."
+            ),
+            recommendation="Pode assinar — documentos equivalentes no texto.",
+            material_changes_count=0,
+            high_risk_count=0,
+            has_significant_changes=False,
+            contractual_changes=[],
+            summary="Sem diferenças.",
+            similarity_score=similarity_score,
+        )
+
+    if progress_callback:
+        progress_callback(2, 3, f"Validando {len(changed)} alteração(ões) com IA…")
+
+    hunk_by_id = {h.hunk_id: h for h in changed}
+    try:
+        llm = get_llm(temperature=0, max_output_tokens=min(8192, _analysis_max_tokens()))
+        structured = llm.with_structured_output(_SigningValidationLLM)
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", SIGNING_VALIDATION_SYSTEM), ("user", SIGNING_VALIDATION_USER)]
+        )
+        raw: _SigningValidationLLM = (prompt | structured).invoke(
+            {
+                "label_a": label_a,
+                "label_b": label_b,
+                "similarity": similarity_score,
+                "hunks_digest": _digest_hunks_for_signing(changed),
+            }
+        )
+    except Exception as exc:
+        logger.warning("Validação com IA falhou — fallback regras: {}", exc)
+        return validate_hunks_as_changes(
+            hunks,
+            text_a,
+            text_b,
+            label_a,
+            label_b,
+            contract_id,
+            similarity_score=similarity_score,
+        )
+
+    changes: list[ContractualChange] = []
+    for flag in raw.material_flags:
+        if not flag.is_material:
+            continue
+        h = hunk_by_id.get(flag.hunk_id)
+        if h is None and flag.hunk_id:
+            # tenta match por prefixo/parcial
+            for hid, cand in hunk_by_id.items():
+                if hid.startswith(flag.hunk_id) or flag.hunk_id in hid:
+                    h = cand
+                    break
+        if h is None:
+            continue
+        changes.append(
+            ContractualChange(
+                change_id=h.hunk_id,
+                category=_hunk_category(h.change_type),
+                clause_reference="Validação pré-assinatura",
+                title=flag.title or _hunk_title(h),
+                description=(flag.reason or (h.text_b or h.text_a or ""))[:800],
+                original_text=h.text_a,
+                new_text=h.text_b,
+                legal_impact=flag.reason or "Alteração material detectada na versão para assinar.",
+                risk_level=flag.risk_level or ChangeRisk.HIGH,
+                requires_attention=True,
+            )
+        )
+
+    # Se a IA disse inseguro mas não marcou flags, inclui hunks com keyword jurídica.
+    if not raw.safe_to_sign and not changes:
+        for h in changed:
+            if _hunk_has_legal_keyword(h):
+                changes.append(
+                    ContractualChange(
+                        change_id=h.hunk_id,
+                        category=_hunk_category(h.change_type),
+                        clause_reference="Validação pré-assinatura",
+                        title=_hunk_title(h),
+                        description=(h.text_b or h.text_a or "")[:800],
+                        original_text=h.text_a,
+                        new_text=h.text_b,
+                        legal_impact="Possível alteração material (revisar antes de assinar).",
+                        risk_level=ChangeRisk.HIGH,
+                        requires_attention=True,
+                    )
+                )
+
+    high = [c for c in changes if c.risk_level == ChangeRisk.HIGH]
+    if changes:
+        summary = raw.executive_summary or (
+            f"Atenção: {len(changes)} alteração(ões) material(is) entre a versão acordada "
+            f"e a enviada para assinatura."
+        )
+        recommendation = raw.recommendation or (
+            "Não assine ainda — revise as alterações materiais listadas."
+        )
+    else:
+        summary = raw.executive_summary or (
+            f"{len(changed)} diferença(s) textual(is), nenhuma classificada como material "
+            f"para fins de assinatura (similaridade {similarity_score:.0%})."
+        )
+        recommendation = raw.recommendation or "Pode assinar — sem alteração material relevante."
+
+    if progress_callback:
+        progress_callback(3, 3, "Validação pré-assinatura concluída")
+
     return ContractDiffResult(
         contract_id=contract_id,
         version_a_label=label_a,
@@ -589,14 +800,19 @@ def compare_contracts(
     *,
     mode: AnalysisMode = AnalysisMode.CRITERIOSA,
     progress_callback: ProgressCallback | None = None,
+    text_diff: TextDiffResult | None = None,
 ) -> ContractDiffResult:
-    """Comparação completa — delega ao diff textual e ao modo escolhido."""
+    """Comparação completa — delega ao diff textual e ao modo escolhido.
+
+    Passe ``text_diff`` pré-calculado para evitar recomputar o diff no caller.
+    """
     if progress_callback:
         progress_callback(1, 3, "Calculando diff textual…")
 
-    text_diff = compute_text_diff(
-        text_a, text_b, contract_id=contract_id, label_a=label_a, label_b=label_b
-    )
+    if text_diff is None:
+        text_diff = compute_text_diff(
+            text_a, text_b, contract_id=contract_id, label_a=label_a, label_b=label_b
+        )
     hunks = text_diff.hunks
     changed_hunks = [h for h in hunks if h.change_type != "unchanged"]
 
@@ -622,8 +838,8 @@ def compare_contracts(
 
     if mode == AnalysisMode.VALIDACAO:
         if progress_callback:
-            progress_callback(3, 3, "Validação por regras concluída")
-        return validate_hunks_as_changes(
+            progress_callback(2, 3, "Validação pré-assinatura (relevância material)…")
+        return validate_signing_version(
             hunks,
             text_a,
             text_b,
@@ -631,6 +847,7 @@ def compare_contracts(
             label_b,
             contract_id,
             similarity_score=text_diff.similarity_score,
+            progress_callback=progress_callback,
         )
 
     if progress_callback:
@@ -649,6 +866,7 @@ def compare_contracts(
     if progress_callback:
         progress_callback(3, 3, "Análise concluída")
     return result
+
 
 
 def compare_contracts_full_document(

@@ -76,10 +76,12 @@ class DiffHunkIndex:
         path_new: str | None = None,
         *,
         use_embeddings: bool = True,
+        attach_locations: bool = True,
     ) -> DiffHunkIndex:
         hunks = paragraph_diff_hunks(text_a, text_b, context_paragraphs=3)
-        for hunk in hunks:
-            _attach_hunk_locations(hunk, path_base, path_new)
+        if attach_locations and (path_base or path_new):
+            for hunk in hunks:
+                _attach_hunk_locations(hunk, path_base, path_new)
 
         vectors: list[list[float]] = []
         active_embeddings = use_embeddings and embeddings_available()
@@ -91,9 +93,10 @@ class DiffHunkIndex:
                 active_embeddings = False
 
         logger.info(
-            "Índice de diff: {} bloco(s), embeddings={}",
+            "Índice de diff: {} bloco(s), embeddings={}, locations={}",
             len(hunks),
             active_embeddings,
+            attach_locations and bool(path_base or path_new),
         )
         return cls(hunks=hunks, vectors=vectors, uses_embeddings=active_embeddings)
 

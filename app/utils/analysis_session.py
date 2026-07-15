@@ -34,6 +34,7 @@ def clear_compare_analysis_results() -> None:
     """Remove resultados da comparação de versões (antes de nova análise)."""
     for key in _COMPARE_RESULT_KEYS:
         st.session_state.pop(key, None)
+    st.session_state.pop("_bgf_balloon_html_cache", None)
 
 
 def clear_matrix_initial_analysis_results() -> None:

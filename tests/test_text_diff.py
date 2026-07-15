@@ -158,3 +158,4 @@ class TestTextDiffRealContracts:
         material = [c for c in result.contractual_changes if c.requires_attention]
         assert material == []
         assert result.similarity_score == 1.0
+        assert not isinstance(result, tuple)

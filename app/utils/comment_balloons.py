@@ -320,14 +320,27 @@ def _pdf_column_html(
     *,
     sync_group: str,
     show_markers: bool,
+    render_all_pages: bool = False,
 ) -> str:
     total = page_count_cached(file_path)
     markers_by_page: dict[int, list[_CommentMarker]] = {}
     for m in markers or []:
         markers_by_page.setdefault(m.page, []).append(m)
 
+    # Por padrão só renderiza páginas com balões (+ vizinhos), bem mais rápido em PDFs longos.
+    if render_all_pages or not markers_by_page:
+        page_nums = list(range(1, total + 1))
+    else:
+        wanted: set[int] = set()
+        for p in markers_by_page:
+            for d in (-1, 0, 1):
+                n = p + d
+                if 1 <= n <= total:
+                    wanted.add(n)
+        page_nums = sorted(wanted)
+
     pages: list[str] = []
-    for p in range(1, total + 1):
+    for p in page_nums:
         try:
             png = render_page_image_cached(file_path, p, zoom=_ZOOM)
             b64 = base64.b64encode(png).decode("ascii")
@@ -343,10 +356,20 @@ def _pdf_column_html(
             f'alt="Página {p}"/>{overlays}</div>'
         )
 
+    skipped = total - len(page_nums)
+    note = ""
+    if skipped > 0:
+        note = (
+            f'<p style="font-size:0.8rem;color:#64748b;margin:0 0 8px;">'
+            f"Mostrando {len(page_nums)} de {total} páginas "
+            f"(com comentários ou vizinhas). Ative "
+            f"<em>Documento completo</em> abaixo para renderizar todas.</p>"
+        )
+
     body = "".join(pages) or "<em>Sem páginas</em>"
     return (
         f'<div class="bgf-sbs-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
-        f"<h4>{html.escape(label)}</h4>{body}</div>"
+        f"<h4>{html.escape(label)}</h4>{note}{body}</div>"
     )
 
 
@@ -408,11 +431,17 @@ def _column_html(
     *,
     sync_group: str,
     show_markers: bool,
+    render_all_pages: bool = False,
 ) -> str:
     ft = file_type.lower() if file_type else Path(file_path).suffix.lower().lstrip(".")
     if ft == "pdf":
         return _pdf_column_html(
-            file_path, label, markers, sync_group=sync_group, show_markers=show_markers
+            file_path,
+            label,
+            markers,
+            sync_group=sync_group,
+            show_markers=show_markers,
+            render_all_pages=render_all_pages,
         )
     if ft in ("docx", "doc"):
         return _docx_column_html(
@@ -625,6 +654,21 @@ def ensure_comment_balloon_handler(reviews: list[CommentReview] | None = None) -
     st.session_state[_INJECTED_BALLOON_KEY] = True
 
 
+def _balloon_cache_key(
+    path_a: str,
+    path_b: str,
+    reviews: list[CommentReview],
+    *,
+    render_all_pages: bool,
+) -> str:
+    ids = ",".join(sorted(r.comment_id for r in reviews))
+    try:
+        mtime = f"{Path(path_a).stat().st_mtime_ns}:{Path(path_b).stat().st_mtime_ns}"
+    except OSError:
+        mtime = "0"
+    return f"{path_a}|{path_b}|{mtime}|{ids}|all={int(render_all_pages)}"
+
+
 def build_side_by_side_balloons_html(
     path_a: str,
     type_a: str,
@@ -635,8 +679,16 @@ def build_side_by_side_balloons_html(
     label_a: str = "Versão base",
     label_b: str = "Versão revisada",
     sync_group: str = "cmp_sbs",
+    render_all_pages: bool = False,
 ) -> str:
     """HTML lado a lado: balões na âncora do comentário (base) e no trecho revisado (nova)."""
+    cache_key = _balloon_cache_key(
+        path_a, path_b, reviews, render_all_pages=render_all_pages
+    )
+    cached = st.session_state.get("_bgf_balloon_html_cache")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["html"]
+
     extracted = _extracted_by_id(path_a)
     base_markers = _markers_for_side(
         reviews, path_a, type_a, side="base", extracted=extracted
@@ -653,18 +705,32 @@ def build_side_by_side_balloons_html(
         "</div>"
     )
     left = _column_html(
-        path_a, type_a, label_a, base_markers, sync_group=sync_group, show_markers=True
+        path_a,
+        type_a,
+        label_a,
+        base_markers,
+        sync_group=sync_group,
+        show_markers=True,
+        render_all_pages=render_all_pages,
     )
     right = _column_html(
-        path_b, type_b, label_b, new_markers, sync_group=sync_group, show_markers=True
+        path_b,
+        type_b,
+        label_b,
+        new_markers,
+        sync_group=sync_group,
+        show_markers=True,
+        render_all_pages=render_all_pages,
     )
     # Streamlit remove <script> do markdown — dados ficam em div oculta.
     payload = html.escape(_reviews_payload(reviews), quote=False)
-    return (
+    html_block = (
         f"{_BALLOON_CSS}{legend}"
         f'<div class="bgf-sbs-outer"><div class="bgf-sbs-grid">{left}{right}</div></div>'
         f'<div id="bgf-comments-data" hidden>{payload}</div>'
     )
+    st.session_state["_bgf_balloon_html_cache"] = {"key": cache_key, "html": html_block}
+    return html_block
 
 
 def _apply_reinforcement(rev: CommentReview, new_version) -> None:
@@ -745,7 +811,16 @@ def render_side_by_side_with_comment_balloons(
 ) -> None:
     """Renderiza comparação lado a lado com balões de comentário."""
     ensure_sync_scroll_handler()
-    render_sync_scroll_controls(key=f"{sync_group}_sync_scroll")
+    c_sync, c_full = st.columns([3, 2])
+    with c_sync:
+        render_sync_scroll_controls(key=f"{sync_group}_sync_scroll")
+    with c_full:
+        render_all = st.checkbox(
+            "Documento completo (todas as páginas PDF)",
+            value=False,
+            key=f"{sync_group}_balloon_full_pdf",
+            help="Mais lento em PDFs longos. Por padrão só páginas com comentários.",
+        )
     html_block = build_side_by_side_balloons_html(
         path_a,
         type_a,
@@ -755,6 +830,7 @@ def render_side_by_side_with_comment_balloons(
         label_a=label_a,
         label_b=label_b,
         sync_group=sync_group,
+        render_all_pages=render_all,
     )
     st.markdown(html_block, unsafe_allow_html=True)
     # Depois do HTML: dados + listener de clique (Streamlit remove <script> do markdown).

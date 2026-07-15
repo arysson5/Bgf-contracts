@@ -21,7 +21,6 @@ from loguru import logger
 
 from app.core import differ, extractor
 from app.core.diff_index import DiffHunkIndex
-from app.core.text_diff import compute_text_diff
 from app.db import database as db
 from app.models.schemas import (
     AnalysisMode,
@@ -60,6 +59,11 @@ from app.utils.ui import (
 setup_page("Comparar Versões")
 settings = get_settings()
 
+# Limpa resultado antigo em tupla (bug de versão anterior) antes de renderizar.
+_stale = st.session_state.get("last_diff_result")
+if isinstance(_stale, tuple):
+    clear_compare_analysis_results()
+
 page_header(
     "Comparar versões",
     "Diff textual estilo PDF24, validação por regras ou análise criteriosa com IA nos trechos confirmados.",
@@ -68,6 +72,8 @@ page_header(
 render_active_contract_banner(context="compare")
 
 RISK_ICON = {ChangeRisk.HIGH: "🔴", ChangeRisk.MEDIUM: "🟡", ChangeRisk.LOW: "🟢"}
+
+COMPARE_BUILD = "2026-07-15-modos-v3"
 
 _ANALYSIS_LABELS = {
     "Comparar textos (sem IA)": AnalysisMode.TEXT_DIFF,
@@ -78,17 +84,70 @@ _ANALYSIS_LABELS = {
 
 
 def _analysis_mode_from_session() -> AnalysisMode:
-    label = st.session_state.get("compare_analysis_mode", "Comparar textos (sem IA)")
-    return _ANALYSIS_LABELS.get(label, AnalysisMode.TEXT_DIFF)
+    """Lê o modo direto dos radios (fonte da verdade) — evita session_state stale."""
+    top = st.session_state.get("compare_top_kind", "Comparar textos")
+    if top == "Comparar textos":
+        return AnalysisMode.TEXT_DIFF
+    ia = st.session_state.get("compare_ia_submode", "Diferenças")
+    mapping = {
+        "Diferenças": AnalysisMode.DIFERENCAS,
+        "Validação": AnalysisMode.VALIDACAO,
+        "Criteriosa (IA nos trechos)": AnalysisMode.CRITERIOSA,
+    }
+    return mapping.get(ia, AnalysisMode.DIFERENCAS)
+
+
+def _mode_key(mode: AnalysisMode | str) -> str:
+    if isinstance(mode, AnalysisMode):
+        return mode.value
+    return str(mode)
+
+
+def _allows_comment_pipeline(mode: AnalysisMode | str) -> bool:
+    """Único modo autorizado a extrair/analisar comentários."""
+    return _mode_key(mode) == AnalysisMode.CRITERIOSA.value
 
 
 def _skip_llm_for_mode(mode: AnalysisMode) -> bool:
-    return mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS, AnalysisMode.VALIDACAO)
+    """Modos sem LLM nos hunks/contrato (Validação e Criteriosa usam IA)."""
+    return _mode_key(mode) in (
+        AnalysisMode.TEXT_DIFF.value,
+        AnalysisMode.DIFERENCAS.value,
+    )
 
 
 def _skip_llm_for_comment_review(mode: AnalysisMode) -> bool:
-    """Comentários usam IA em qualquer modo «Comparar com IA»; só diff puro dispensa."""
-    return mode == AnalysisMode.TEXT_DIFF
+    return not _allows_comment_pipeline(mode)
+
+
+def _should_verify_comments(mode: AnalysisMode) -> bool:
+    return _allows_comment_pipeline(mode)
+
+
+_MODE_UI_LABELS = {
+    AnalysisMode.TEXT_DIFF: "Comparar textos — só diff (sem comentários)",
+    AnalysisMode.DIFERENCAS: "Diferenças — só diff rápido (sem comentários)",
+    AnalysisMode.VALIDACAO: "Validação — checagem pré-assinatura (IA na relevância)",
+    AnalysisMode.CRITERIOSA: "Criteriosa — Gemini + comentários",
+}
+
+
+def _coerce_diff_result(value) -> ContractDiffResult | None:
+    """Normaliza last_diff_result (tupla legado, reload de módulo, etc.)."""
+    if value is None:
+        return None
+    # Desempacota tuplas aninhadas geradas por versões intermediárias da API.
+    while isinstance(value, tuple) and value:
+        if len(value) > 1 and hasattr(value[1], "side_by_side_html"):
+            if not st.session_state.get("last_text_diff_result"):
+                st.session_state.last_text_diff_result = value[1]
+        value = value[0]
+    if isinstance(value, ContractDiffResult):
+        return value
+    # Após hot-reload o tipo pode ser outra classe com o mesmo shape.
+    if hasattr(value, "contractual_changes") and hasattr(value, "executive_summary"):
+        return value  # type: ignore[return-value]
+    return None
 
 
 def _render_contractual_results(
@@ -107,7 +166,14 @@ def _render_contractual_results(
     text_diff: TextDiffResult | None = None,
     analysis_mode: AnalysisMode = AnalysisMode.TEXT_DIFF,
 ) -> None:
+    result = _coerce_diff_result(result)
+    if result is None:
+        st.error("Resultado da comparação inválido. Clique em **Comparar versões** novamente.")
+        clear_compare_analysis_results()
+        return
+
     section_title("Resultado")
+    st.caption(f"Modo executado: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
 
     try:
         from app.utils.comment_balloons import close_comment_modal_overlay
@@ -140,8 +206,9 @@ def _render_contractual_results(
     if not diff_html and analysis_mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS):
         diff_html = result.executive_summary  # fallback
 
+    # Balões pesados (PDF página a página) só na Criteriosa, onde há análise IA dos comentários.
     show_comment_balloons = (
-        analysis_mode != AnalysisMode.TEXT_DIFF
+        analysis_mode == AnalysisMode.CRITERIOSA
         and comment_verification is not None
         and comment_verification.total_comments > 0
     )
@@ -171,7 +238,18 @@ def _render_contractual_results(
             st.warning("Arquivos não disponíveis para visualização.")
 
     with tab_comments:
-        if comment_verification:
+        if analysis_mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS):
+            st.info(
+                "Neste modo o sistema faz **apenas o diff textual** entre os arquivos. "
+                "Comentários não são extraídos. Use **Criteriosa** para analisá-los."
+            )
+        elif analysis_mode == AnalysisMode.VALIDACAO:
+            st.info(
+                "Modo **Validação (pré-assinatura)**: compara a versão acordada com a "
+                "enviada para assinar e destaca só alterações **materiais**. "
+                "Comentários não são analisados — use **Criteriosa** para isso."
+            )
+        elif comment_verification and comment_verification.total_comments:
             render_comment_verification_results(
                 comment_verification,
                 new_version=version_new,
@@ -254,41 +332,38 @@ def _run_compare(
         status_caption.caption(label)
 
     try:
-        if mode == AnalysisMode.TEXT_DIFF:
-            status_caption.caption("Fase 1/2: calculando diff textual…")
-            progress_bar.progress(0.2, text="Diff textual…")
-            text_diff_result = differ.compare_text_only(
-                text_a, text_b, label_a, label_b, contract_id
-            )
-            progress_bar.progress(0.6, text="Montando resultado…")
-            result = differ.compare_versions(
-                text_a,
-                text_b,
-                label_a,
-                label_b,
-                contract_id,
-                path_a=path_a,
-                path_b=path_b,
-                mode=AnalysisMode.TEXT_DIFF,
-                progress_callback=_on_progress,
-            )
-        else:
-            status_caption.caption("Fase 1/3: extraindo e comparando textos…")
-            result = differ.compare_versions(
-                text_a,
-                text_b,
-                label_a,
-                label_b,
-                contract_id,
-                path_a=path_a,
-                path_b=path_b,
-                mode=mode,
-                progress_callback=_on_progress,
-            )
-            text_diff_result = compute_text_diff(
-                text_a, text_b, contract_id=contract_id, label_a=label_a, label_b=label_b
-            )
-        progress_bar.progress(1.0, text="Comparação concluída")
+        phase = "Fase 1/3" if mode == AnalysisMode.CRITERIOSA else (
+            "Fase 1/2" if mode == AnalysisMode.VALIDACAO else "Fase 1/1"
+        )
+        status_caption.caption(f"{phase}: {_MODE_UI_LABELS.get(mode, mode.value)}")
+        progress_bar.progress(0.15, text=f"Modo {mode.value}: diff textual…")
+        logger.info("Comparação iniciada no modo {}", mode.value)
+
+        from app.core.text_diff import compute_text_diff
+
+        text_diff_result = compute_text_diff(
+            text_a,
+            text_b,
+            contract_id=contract_id,
+            label_a=label_a,
+            label_b=label_b,
+        )
+        result = differ.compare_versions(
+            text_a,
+            text_b,
+            label_a,
+            label_b,
+            contract_id,
+            path_a=path_a,
+            path_b=path_b,
+            mode=mode,
+            progress_callback=_on_progress,
+            text_diff=text_diff_result,
+        )
+        result = _coerce_diff_result(result)
+        if result is None:
+            raise TypeError("compare_versions não retornou ContractDiffResult")
+        progress_bar.progress(1.0, text=f"Comparação concluída ({mode.value})")
         return result, text_diff_result
     except ValueError as exc:
         st.error(str(exc))
@@ -311,6 +386,68 @@ def _show_analysis_error(exc: Exception) -> None:
         st.warning(f"Erro na análise: {msg}. Tente novamente.")
 
 
+def _run_comment_pipeline_criteriosa(
+    *,
+    base_v,
+    new_v,
+    contract_id: str,
+    path_a: str,
+    path_b: str,
+    text_a: str,
+    text_b: str,
+    text_diff: TextDiffResult | None,
+    progress_bar,
+    status_caption,
+) -> CommentsReviewResult:
+    """Pipeline de comentários — chamar SOMENTE no modo Criteriosa."""
+    n_comments = count_comments_in_file(path_a)
+    diff_index: DiffHunkIndex | None = None
+    if n_comments and text_diff and text_a and text_b:
+        status_caption.caption("Indexando blocos de diferença para os comentários…")
+        diff_index = DiffHunkIndex.build(
+            text_a,
+            text_b,
+            path_a,
+            path_b,
+            use_embeddings=True,
+            attach_locations=True,
+        )
+        text_diff.paragraph_hunks = diff_index.hunks
+
+    if not n_comments:
+        return CommentsReviewResult(
+            contract_id=contract_id,
+            total_comments=0,
+            attended=0,
+            not_attended=0,
+            partially=0,
+            reviews=[],
+            overall_attended_rate=0.0,
+            admin_summary="Nenhum comentário na versão base.",
+        )
+
+    status_caption.caption(
+        f"Fase 3/3: verificando {n_comments} comentário(s) com IA (Gemini Pro)…"
+    )
+
+    def _cmt_progress(cur: int, total: int, lbl: str) -> None:
+        progress_bar.progress(
+            0.7 + (cur / total) * 0.3 if total else 1.0,
+            text=lbl,
+        )
+        status_caption.caption(lbl)
+
+    return verify_comments_between_versions(
+        base_v,
+        new_v,
+        contract_id,
+        text_diff=text_diff,
+        diff_index=diff_index if text_diff else None,
+        progress_callback=_cmt_progress,
+        skip_llm=False,
+    )
+
+
 def _run_full_compare(
     base_v,
     new_v,
@@ -325,8 +462,18 @@ def _run_full_compare(
     save_version_id: str | None = None,
     mode: AnalysisMode,
 ) -> None:
-    progress_bar = st.progress(0.0, text="Iniciando comparação…")
+    mode_key = _mode_key(mode)
+    logger.info(
+        "COMPARE_BUILD={} | mode={} | comments_allowed={}",
+        COMPARE_BUILD,
+        mode_key,
+        _allows_comment_pipeline(mode),
+    )
+    progress_bar = st.progress(0.0, text=f"Iniciando ({mode_key}) [{COMPARE_BUILD}]…")
     status_caption = st.empty()
+    status_caption.caption(
+        f"Build {COMPARE_BUILD} · modo **{_MODE_UI_LABELS.get(mode, mode_key)}**"
+    )
 
     result, text_diff = _run_compare(
         text_a,
@@ -340,67 +487,44 @@ def _run_full_compare(
         progress_bar=progress_bar,
         status_caption=status_caption,
     )
+    result = _coerce_diff_result(result)
     if not result:
         return
 
-    diff_index: DiffHunkIndex | None = None
-    if text_diff and text_a and text_b:
-        diff_index = DiffHunkIndex.build(
-            text_a,
-            text_b,
-            path_a,
-            path_b,
-            use_embeddings=not _skip_llm_for_comment_review(mode),
-        )
-        text_diff.paragraph_hunks = diff_index.hunks
+    if text_diff and text_diff.hunks and not text_diff.paragraph_hunks:
+        text_diff.paragraph_hunks = [
+            h for h in text_diff.hunks if h.change_type != "unchanged"
+        ]
 
-    skip_llm = _skip_llm_for_mode(mode)
-    skip_llm_comments = _skip_llm_for_comment_review(mode)
     verification: CommentsReviewResult | None = None
-    n_comments = count_comments_in_file(path_a)
 
-    if n_comments:
-        ia_cmt = "com IA" if not skip_llm_comments else "regras locais (sem IA)"
-        status_caption.caption(
-            f"Fase {'2/2' if skip_llm else '3/3'}: verificando {n_comments} comentário(s) {ia_cmt}…"
-        )
-
-        def _cmt_progress(cur: int, total: int, lbl: str) -> None:
-            base_pct = 0.7 if not skip_llm else 0.5
-            progress_bar.progress(
-                base_pct + (cur / total) * (1.0 - base_pct) if total else 1.0,
-                text=lbl,
-            )
-            status_caption.caption(lbl)
-
-        verification = verify_comments_between_versions(
-            base_v,
-            new_v,
-            contract_id,
+    # Gate duro por string — comentários SÓ em criteriosa.
+    if mode_key == AnalysisMode.CRITERIOSA.value:
+        verification = _run_comment_pipeline_criteriosa(
+            base_v=base_v,
+            new_v=new_v,
+            contract_id=contract_id,
+            path_a=path_a,
+            path_b=path_b,
+            text_a=text_a,
+            text_b=text_b,
             text_diff=text_diff,
-            diff_index=diff_index if text_diff else None,
-            progress_callback=_cmt_progress,
-            skip_llm=skip_llm_comments,
+            progress_bar=progress_bar,
+            status_caption=status_caption,
         )
     else:
-        verification = CommentsReviewResult(
-            contract_id=contract_id,
-            total_comments=0,
-            attended=0,
-            not_attended=0,
-            partially=0,
-            reviews=[],
-            overall_attended_rate=0.0,
-            admin_summary="Nenhum comentário na versão base.",
-        )
+        # text_diff | diferencas | validacao — zero extract/verify de comentários.
+        status_caption.caption(f"Concluído sem extrair comentários ({mode_key}).")
 
-    progress_bar.progress(1.0, text="Análise concluída")
-    status_caption.success("Comparação finalizada.")
+    progress_bar.progress(1.0, text="Comparação concluída")
+    status_caption.success(
+        f"Finalizado — {_MODE_UI_LABELS.get(mode, mode_key)} [{COMPARE_BUILD}]"
+    )
 
     st.session_state.last_diff_result = result
     st.session_state.last_text_diff_result = text_diff
     st.session_state.last_comment_verification = verification
-    st.session_state.last_compare_mode = mode.value
+    st.session_state.last_compare_mode = mode_key
     st.session_state.last_regression_result = None
 
 
@@ -424,8 +548,17 @@ def _compare_analysis_token(
 def _show_compare_results(ctx: dict) -> None:
     if st.session_state.get("compare_mode_kind") != ctx.get("kind"):
         return
-    if not st.session_state.get("last_diff_result"):
+    raw_result = st.session_state.get("last_diff_result")
+    if not raw_result:
         return
+    result = _coerce_diff_result(raw_result)
+    if result is None:
+        # Estado inconsistente (ex.: tupla antiga) — limpa e pede nova análise.
+        clear_compare_analysis_results()
+        st.warning("Resultado anterior inválido após atualização. Clique em **Comparar versões** de novo.")
+        return
+    if result is not raw_result:
+        st.session_state.last_diff_result = result
     token = ctx.get("analysis_token")
     if token and not compare_token_matches(token):
         return
@@ -436,7 +569,7 @@ def _show_compare_results(ctx: dict) -> None:
         mode = AnalysisMode.TEXT_DIFF
     st.divider()
     _render_contractual_results(
-        st.session_state.last_diff_result,
+        result,
         ctx["path_a"],
         ctx["path_b"],
         ctx["type_a"],
@@ -454,6 +587,7 @@ def _show_compare_results(ctx: dict) -> None:
 
 def _diff_section() -> None:
     section_title("Tipo de análise")
+    st.caption(f"Código da comparação: `{COMPARE_BUILD}` — se não aparecer, reinicie o Streamlit.")
     top_kind = st.radio(
         "Escolha o tipo",
         ["Comparar textos", "Comparar com IA"],
@@ -462,6 +596,9 @@ def _diff_section() -> None:
     )
     if top_kind == "Comparar textos":
         st.session_state.compare_analysis_mode = "Comparar textos (sem IA)"
+        st.caption(
+            "Diff rápido entre os dois arquivos — **sem** extrair nem analisar comentários."
+        )
     else:
         ia_labels = ["Diferenças", "Validação", "Criteriosa (IA nos trechos)"]
         ia_map = {
@@ -477,10 +614,9 @@ def _diff_section() -> None:
         )
         st.session_state.compare_analysis_mode = ia_map[ia_sel]
         st.caption(
-            "**Diferenças**: diff textual convertido em alterações. "
-            "**Validação**: regras + fuzzy nos trechos. "
-            "**Criteriosa**: Gemini Pro só nos hunks confirmados. "
-            "**Comentários**: sempre analisados por IA (Gemini Pro) neste modo."
+            "**Diferenças**: diff rápido — **não** extrai comentários. "
+            "**Validação**: checagem pré-assinatura (IA) — **não** extrai comentários. "
+            "**Criteriosa**: único modo que extrai e analisa comentários com Gemini."
         )
 
     section_title("Origem dos arquivos")
@@ -544,11 +680,13 @@ def _diff_hybrid_last_vs_upload() -> None:
     else:
         va = versions[-1]
 
-    n_base = count_comments_in_file(va.file_path)
-    if n_base:
-        st.caption(f"**{n_base}** comentário(s) em v{va.version_number} — {va.label}")
-    else:
-        st.warning("Nenhum comentário detectado nesta versão.")
+    # Contagem de comentários só quando o modo escolhido for Criteriosa.
+    if _analysis_mode_from_session() == AnalysisMode.CRITERIOSA:
+        n_base = count_comments_in_file(va.file_path)
+        if n_base:
+            st.caption(f"**{n_base}** comentário(s) em v{va.version_number} — {va.label}")
+        else:
+            st.warning("Nenhum comentário detectado nesta versão.")
 
     file_b = st.file_uploader(
         "Versão revisada do cliente (PDF ou DOCX)",
@@ -563,12 +701,11 @@ def _diff_hybrid_last_vs_upload() -> None:
         key="hybrid_save_version",
     )
 
-    analysis_mode = _analysis_mode_from_session()
-
     if st.button("Comparar versões", type="primary", key="cmp_run_hybrid"):
         if not file_b:
             st.warning("Envie o arquivo da versão revisada.")
         else:
+            analysis_mode = _analysis_mode_from_session()
             clear_compare_analysis_results()
             try:
                 with st.spinner("Extraindo texto da versão revisada…"):
@@ -607,6 +744,7 @@ def _diff_hybrid_last_vs_upload() -> None:
                         label=label_b,
                     )
 
+                st.caption(f"Executando: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
                 _run_full_compare(
                     va,
                     new_v,
@@ -666,12 +804,12 @@ def _diff_quick_two_uploads() -> None:
         )
         label_b = st.text_input("Nome", value="Versão revisada", key="ql_b")
 
-    analysis_mode = _analysis_mode_from_session()
-
     if st.button("Comparar versões", type="primary", key="cmp_run_quick"):
         if not file_a or not file_b:
             st.warning("Envie os dois arquivos.")
         else:
+            analysis_mode = _analysis_mode_from_session()
+            logger.info("Botão quick: modo efetivo={}", analysis_mode.value)
             clear_compare_analysis_results()
             try:
                 with st.spinner("Extraindo texto…"):
@@ -697,6 +835,7 @@ def _diff_quick_two_uploads() -> None:
                     extracted_text=text_b,
                     label=label_b,
                 )
+                st.caption(f"Executando: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
                 _run_full_compare(
                     base_v,
                     new_v,
@@ -752,19 +891,20 @@ def _diff_two_saved_versions() -> None:
 
     va, vb = render_compare_version_pair(versions, base_key="base_ver", new_key="new_ver")
 
-    n_base = count_comments_in_file(va.file_path)
-    if n_base:
-        st.caption(f"**{n_base}** comentário(s) na versão base.")
-    elif count_comments_in_file(vb.file_path) == 0:
-        st.warning("Nenhum comentário detectado na versão base.")
-
-    analysis_mode = _analysis_mode_from_session()
+    if _analysis_mode_from_session() == AnalysisMode.CRITERIOSA:
+        n_base = count_comments_in_file(va.file_path)
+        if n_base:
+            st.caption(f"**{n_base}** comentário(s) na versão base.")
+        elif count_comments_in_file(vb.file_path) == 0:
+            st.warning("Nenhum comentário detectado na versão base.")
 
     if st.button("Comparar versões", type="primary", key="cmp_run_saved"):
         if va.id == vb.id:
             st.warning("Selecione duas versões diferentes.")
         else:
+            analysis_mode = _analysis_mode_from_session()
             clear_compare_analysis_results()
+            st.caption(f"Executando: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
             _run_full_compare(
                 va,
                 vb,
