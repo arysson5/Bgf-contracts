@@ -51,6 +51,6 @@ def test_third_party_dependencies() -> None:
         "fitz",
         "pdfplumber",
         "docx",
-        "langchain_google_genai",
+        "langchain_openai",
     ):
         importlib.import_module(pkg)

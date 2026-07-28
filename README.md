@@ -1,6 +1,6 @@
 # Contract Analyzer
 
-Sistema desktop (Streamlit) para análise e comparação de contratos em PDF e DOCX, com IA via **Google Gemini**.
+Sistema desktop (Streamlit) para análise e comparação de contratos em PDF e DOCX, com IA via **OpenAI**.
 
 ## Funcionalidades
 
@@ -13,7 +13,7 @@ Sistema desktop (Streamlit) para análise e comparação de contratos em PDF e D
 
 - **Python 3.11 ou 3.12 estável** (evite builds alpha)
 - Windows, macOS ou Linux
-- Chave da API Google (Gemini): [Google AI Studio](https://aistudio.google.com/apikey)
+- Chave da API OpenAI: [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 
 ## Instalação
 
@@ -35,9 +35,10 @@ copy .env.example .env          # Windows
 Edite `.env` (nunca commite este arquivo):
 
 ```env
-GOOGLE_API_KEY=sua_chave_aqui
-MODEL_NAME=gemini-2.5-flash
-MAX_TOKENS=8192
+OPENAI_API_KEY=sua_chave_aqui
+MODEL_NAME=gpt-4o-mini
+MODEL_NAME_PRO=gpt-4o
+MAX_TOKENS=16384
 CONTRACTS_DIR=./contracts
 DB_PATH=./contract_analyzer.db
 ```
@@ -59,7 +60,7 @@ Encapsula app, Python e dependências em um container Linux. Banco e contratos f
 ### Pré-requisitos
 
 - [Docker Engine](https://docs.docker.com/engine/install/) ou Docker Desktop (Windows)
-- Arquivo `.env` com `GOOGLE_API_KEY`
+- Arquivo `.env` com `OPENAI_API_KEY`
 
 ### Subir em 3 passos
 
@@ -67,7 +68,7 @@ Encapsula app, Python e dependências em um container Linux. Banco e contratos f
 copy .env.docker.example .env    # Windows
 # cp .env.docker.example .env      # Linux
 
-# Edite .env e coloque sua GOOGLE_API_KEY
+# Edite .env e coloque sua OPENAI_API_KEY
 
 docker compose up -d --build
 ```
@@ -131,7 +132,7 @@ git push -u origin main
 
 - Servidor local em `127.0.0.1` — não expõe a rede automaticamente
 - Uploads: apenas PDF/DOCX, nomes sanitizados, sem path traversal
-- Dados de contratos permanecem locais; texto é enviado à API Gemini para análise
+- Dados de contratos permanecem locais; texto é enviado à API OpenAI para análise
 
 Detalhes: [SECURITY.md](SECURITY.md)
 
@@ -141,7 +142,7 @@ Detalhes: [SECURITY.md](SECURITY.md)
 python test_schemas.py
 python test_differ.py
 python test_extractor.py contrato.pdf
-python test_checker.py      # requer GOOGLE_API_KEY
+python test_checker.py      # requer OPENAI_API_KEY
 ```
 
 ## Estrutura
@@ -160,4 +161,4 @@ contracts/             # uploads (gitignored)
 
 ## Stack
 
-Python 3.11+ · Streamlit · LangChain · Google Gemini · SQLite · SQLModel
+Python 3.11+ · Streamlit · LangChain · OpenAI · SQLite · SQLModel

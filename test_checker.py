@@ -1,4 +1,4 @@
-"""Testa checklist — requer GOOGLE_API_KEY no .env."""
+"""Testa checklist — requer OPENAI_API_KEY no .env."""
 
 from app.core.checker import check_requirements
 
@@ -19,7 +19,7 @@ REQUIREMENTS = [
 
 
 def main() -> None:
-    print("Analisando contrato fake com Gemini...")
+    print("Analisando contrato fake com OpenAI...")
     result = check_requirements(FAKE_CONTRACT, REQUIREMENTS, "test-contract")
     print(f"Score: {result.overall_score:.0%} ({result.requirements_met}/{result.total_requirements})")
     for c in result.checks:

@@ -1,4 +1,4 @@
-"""Testes offline do matrix_analyzer (sem chamar a API Gemini).
+"""Testes offline do matrix_analyzer (sem chamar a API OpenAI).
 
 Verifica a derivação de obrigações adicionais / alertas de risco e o mapeamento
 dos itens da matriz a partir de uma resposta simulada da IA.

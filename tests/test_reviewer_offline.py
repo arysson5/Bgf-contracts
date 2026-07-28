@@ -1,4 +1,4 @@
-"""Revisão de comentários offline — diff textual, sem Gemini."""
+"""Revisão de comentários offline — diff textual, sem OpenAI."""
 
 from __future__ import annotations
 

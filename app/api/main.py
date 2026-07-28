@@ -45,6 +45,7 @@ class TextDiffResponse(BaseModel):
     paragraphs_added: int
     paragraphs_removed: int
     paragraphs_modified: int
+    paragraphs_moved: int = 0
     inline_diff_html: str
     side_by_side_html: str
 
@@ -68,6 +69,7 @@ def api_text_diff(body: TextDiffRequest) -> TextDiffResponse:
         paragraphs_added=result.paragraphs_added,
         paragraphs_removed=result.paragraphs_removed,
         paragraphs_modified=result.paragraphs_modified,
+        paragraphs_moved=result.paragraphs_moved,
         inline_diff_html=result.inline_diff_html,
         side_by_side_html=result.side_by_side_html,
     )

@@ -566,4 +566,4 @@ def render_app_sidebar() -> None:
         st.divider()
         render_logout_button()
         st.divider()
-        st.caption("Powered by Google Gemini")
+        st.caption("Powered by OpenAI")

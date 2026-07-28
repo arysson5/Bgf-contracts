@@ -35,6 +35,7 @@ class ChangeCategory(str, Enum):
     CLAUSE_ADDED = "clausula_adicionada"
     CLAUSE_REMOVED = "clausula_removida"
     CLAUSE_MODIFIED = "clausula_alterada"
+    CLAUSE_MOVED = "clausula_movida"
     COMMERCIAL = "condicoes_comerciais"
     LIABILITY = "responsabilidade"
     TERMINATION = "rescissao"
@@ -175,7 +176,7 @@ class VersionRegressionResult(BaseModel):
 
 class TextDiffHunk(BaseModel):
     hunk_id: str
-    change_type: str  # unchanged | added | removed | modified
+    change_type: str  # unchanged | added | removed | modified | moved
     text_a: Optional[str] = None
     text_b: Optional[str] = None
     locations_base: list[TextLocation] = []
@@ -191,6 +192,7 @@ class TextDiffResult(BaseModel):
     paragraphs_added: int = 0
     paragraphs_removed: int = 0
     paragraphs_modified: int = 0
+    paragraphs_moved: int = 0
     similarity_score: float = Field(default=0.0, ge=0.0, le=1.0)
     side_by_side_html: str = ""
     inline_diff_html: str = ""

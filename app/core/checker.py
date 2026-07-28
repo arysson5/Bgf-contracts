@@ -1,4 +1,4 @@
-"""Pipeline LangChain — checklist de requisitos via Google Gemini."""
+"""Pipeline LangChain — checklist de requisitos via OpenAI."""
 
 from datetime import datetime, timezone
 
@@ -116,7 +116,7 @@ def check_requirements(
     contract_id: str,
 ) -> ContractChecklistResult:
     """
-    Verifica requisitos no contrato via Gemini.
+    Verifica requisitos no contrato via OpenAI.
     Contratos > 6000 tokens usam map-reduce por chunks.
     """
     token_count = count_tokens(contract_text)

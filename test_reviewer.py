@@ -1,4 +1,4 @@
-"""Testa revisão de comentários — requer GOOGLE_API_KEY."""
+"""Testa revisão de comentários — requer OPENAI_API_KEY."""
 
 from app.core.reviewer import review_comments
 from app.core.text_diff import compute_text_diff

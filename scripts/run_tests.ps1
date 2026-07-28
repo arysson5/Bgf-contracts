@@ -44,7 +44,7 @@ $skipped = if ($log -match "(\d+) skipped") { $Matches[1] } else { "0" }
 | test_imports_core | Imports de módulos core/db e dependências |
 | test_text_diff | Diff determinístico, zero falso positivo em textos idênticos |
 | test_extractor_comments | Extração de texto/comentários nos PDFs em contracts/ |
-| test_reviewer_offline | Revisão local de comentários sem Gemini |
+| test_reviewer_offline | Revisão local de comentários sem OpenAI |
 | test_auth_database | Login, owner_user_id, persistência de comentários |
 
 ## Contratos usados

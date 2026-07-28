@@ -1,30 +1,33 @@
-"""Embeddings Google Gemini — indexação leve de blocos de diff."""
+"""Embeddings OpenAI — indexação leve de blocos de diff."""
 
 from __future__ import annotations
 
 import math
 from functools import lru_cache
 
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from loguru import logger
 
 from app.utils.settings import get_settings
 
-DEFAULT_EMBEDDING_MODEL = "models/text-embedding-004"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 
 
 @lru_cache(maxsize=1)
-def get_embeddings_client() -> GoogleGenerativeAIEmbeddings | None:
+def get_embeddings_client() -> OpenAIEmbeddings | None:
     settings = get_settings()
-    if not settings.google_api_key:
-        logger.warning("GOOGLE_API_KEY ausente — busca por embedding desativada")
+    if not settings.openai_api_key:
+        logger.warning("OPENAI_API_KEY ausente — busca por embedding desativada")
         return None
-    model = settings.embedding_model or DEFAULT_EMBEDDING_MODEL
-    if not model.startswith("models/"):
-        model = f"models/{model}"
-    return GoogleGenerativeAIEmbeddings(
+    model = (settings.embedding_model or DEFAULT_EMBEDDING_MODEL).strip()
+    # Compatibilidade com prefixo antigo do Google ("models/...")
+    if model.startswith("models/"):
+        model = model.removeprefix("models/")
+    if model in {"text-embedding-004", "embedding-001"}:
+        model = DEFAULT_EMBEDDING_MODEL
+    return OpenAIEmbeddings(
         model=model,
-        google_api_key=settings.google_api_key,
+        api_key=settings.openai_api_key,
     )
 
 

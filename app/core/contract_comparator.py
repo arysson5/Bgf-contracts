@@ -52,6 +52,8 @@ def _hunk_category(change_type: str) -> ChangeCategory:
         return ChangeCategory.CLAUSE_ADDED
     if change_type == "removed":
         return ChangeCategory.CLAUSE_REMOVED
+    if change_type == "moved":
+        return ChangeCategory.CLAUSE_MOVED
     return ChangeCategory.CLAUSE_MODIFIED
 
 
@@ -60,6 +62,8 @@ def _hunk_title(hunk: TextDiffHunk) -> str:
         return "Parágrafo adicionado"
     if hunk.change_type == "removed":
         return "Parágrafo removido"
+    if hunk.change_type == "moved":
+        return "Parágrafo movido"
     return "Parágrafo alterado"
 
 
@@ -97,7 +101,7 @@ def validate_hunks_as_changes(
     *,
     similarity_score: float = 0.0,
 ) -> ContractDiffResult:
-    """Fallback sem IA: keywords + fuzzy — usado se a validação com Gemini falhar."""
+    """Fallback sem IA: keywords + fuzzy — usado se a validação com OpenAI falhar."""
     changes: list[ContractualChange] = []
     warnings: list[str] = []
     invalid = 0
@@ -623,7 +627,7 @@ REGRAS DE FORMATO (obrigatório):
 - Liste no máximo 12 alterações mais relevantes por análise.
 - original_text e new_text: no máximo 400 caracteres cada (resuma se necessário).
 - Sempre preencha: legal_impact, risk_level (baixo|medio|alto), requires_attention.
-- category: clausula_adicionada | clausula_removida | clausula_alterada | condicoes_comerciais | responsabilidade | rescissao | confidencialidade | outro"""
+- category: clausula_adicionada | clausula_removida | clausula_alterada | clausula_movida | condicoes_comerciais | responsabilidade | rescissao | confidencialidade | outro"""
 
 USER_PROMPT = """VERSÃO ORIGINAL — {label_a}:
 {text_a}
@@ -822,7 +826,8 @@ def compare_contracts(
         summary = (
             f"Diff textual: {text_diff.paragraphs_added} adicionados, "
             f"{text_diff.paragraphs_removed} removidos, "
-            f"{text_diff.paragraphs_modified} alterados. "
+            f"{text_diff.paragraphs_modified} alterados, "
+            f"{text_diff.paragraphs_moved} movidos. "
             f"Similaridade: {text_diff.similarity_score:.0%}."
         )
         return _result_from_hunks(

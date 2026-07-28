@@ -83,6 +83,40 @@ class TestTextDiffSynthetic:
         elapsed = time.perf_counter() - t0
         assert elapsed < 2.0, f"Diff sintético lento: {elapsed:.2f}s"
 
+    def test_moved_paragraph_detected_without_ai(self) -> None:
+        base = (
+            "Introdução do contrato.\n\n"
+            "Cláusula especial de confidencialidade permanece inalterada.\n\n"
+            "Cláusula de prazo de 12 meses.\n\n"
+            "Encerramento."
+        )
+        revised = (
+            "Introdução do contrato.\n\n"
+            "Cláusula de prazo de 12 meses.\n\n"
+            "Cláusula especial de confidencialidade permanece inalterada.\n\n"
+            "Encerramento."
+        )
+        result = compute_text_diff(base, revised)
+        moved = [h for h in result.hunks if h.change_type == "moved"]
+        assert result.paragraphs_moved >= 1
+        assert len(moved) >= 2  # origem + destino
+        moved_texts = {(h.text_a or h.text_b or "") for h in moved}
+        assert any("prazo" in t or "confidencialidade" in t for t in moved_texts)
+        assert result.paragraphs_added == 0
+        assert result.paragraphs_removed == 0
+        html = result.side_by_side_html
+        assert "bgf-diff-moved" in html
+        assert "Movido" in html
+
+    def test_moved_does_not_count_as_content_change(self) -> None:
+        base = "A\n\nBLOCO MOVIDO IDÊNTICO\n\nB\n\nC"
+        revised = "A\n\nB\n\nBLOCO MOVIDO IDÊNTICO\n\nC"
+        result = compute_text_diff(base, revised)
+        assert result.paragraphs_moved >= 1
+        assert result.paragraphs_added == 0
+        assert result.paragraphs_removed == 0
+        assert result.similarity_score == 1.0
+
 
 class TestTextDiffRealContracts:
     def test_identical_extracted_text_no_false_positives(

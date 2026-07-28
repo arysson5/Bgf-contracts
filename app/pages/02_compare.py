@@ -128,7 +128,7 @@ _MODE_UI_LABELS = {
     AnalysisMode.TEXT_DIFF: "Comparar textos — só diff (sem comentários)",
     AnalysisMode.DIFERENCAS: "Diferenças — só diff rápido (sem comentários)",
     AnalysisMode.VALIDACAO: "Validação — checagem pré-assinatura (IA na relevância)",
-    AnalysisMode.CRITERIOSA: "Criteriosa — Gemini + comentários",
+    AnalysisMode.CRITERIOSA: "Criteriosa — OpenAI + comentários",
 }
 
 
@@ -427,7 +427,7 @@ def _run_comment_pipeline_criteriosa(
         )
 
     status_caption.caption(
-        f"Fase 3/3: verificando {n_comments} comentário(s) com IA (Gemini Pro)…"
+        f"Fase 3/3: verificando {n_comments} comentário(s) com IA (OpenAI Pro)…"
     )
 
     def _cmt_progress(cur: int, total: int, lbl: str) -> None:
@@ -616,7 +616,7 @@ def _diff_section() -> None:
         st.caption(
             "**Diferenças**: diff rápido — **não** extrai comentários. "
             "**Validação**: checagem pré-assinatura (IA) — **não** extrai comentários. "
-            "**Criteriosa**: único modo que extrai e analisa comentários com Gemini."
+            "**Criteriosa**: único modo que extrai e analisa comentários com OpenAI."
         )
 
     section_title("Origem dos arquivos")

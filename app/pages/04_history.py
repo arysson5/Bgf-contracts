@@ -162,10 +162,11 @@ elif record.analysis_type == "diff":
 elif record.analysis_type == "text_diff":
     result = TextDiffResult.model_validate(data)
     st.metric("Similaridade", f"{result.similarity_score:.0%}")
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Adicionados", result.paragraphs_added)
     c2.metric("Removidos", result.paragraphs_removed)
     c3.metric("Alterados", result.paragraphs_modified)
+    c4.metric("Movidos", result.paragraphs_moved)
     ensure_sync_scroll_handler()
     st.markdown(result.side_by_side_html, unsafe_allow_html=True)
     sync_scroll_hint()

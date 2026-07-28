@@ -12,11 +12,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    google_api_key: str = ""
-    model_name: str = "gemini-2.5-flash"
+    openai_api_key: str = ""
+    model_name: str = "gpt-4o-mini"
     model_name_pro: str = ""  # opcional — vazio usa model_name
-    max_tokens: int = 32768
-    embedding_model: str = "text-embedding-004"
+    max_tokens: int = 16384
+    embedding_model: str = "text-embedding-3-small"
+
     contracts_dir: str = "./contracts"
     db_path: str = "./contract_analyzer.db"
     export_dir: str = ""

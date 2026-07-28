@@ -46,3 +46,16 @@ def psi_bgf_docx(contracts_dir: Path) -> Path:
     if not path.is_file():
         pytest.skip(f"Contrato DOCX não encontrado: {path.name}")
     return path
+
+
+@pytest.fixture(scope="session")
+def temp_compare_pair(contracts_dir: Path) -> tuple[Path, Path]:
+    """Par opcional em contracts/_temp/ para testes de diff/comentários reais."""
+    temp_dir = contracts_dir / "_temp"
+    if not temp_dir.is_dir():
+        pytest.skip("Pasta contracts/_temp/ não disponível")
+    bases = sorted(temp_dir.glob("a_*_comentarios.pdf"))
+    revs = sorted(temp_dir.glob("b_*_devolutiva_revisao.pdf"))
+    if not bases or not revs:
+        pytest.skip("Par a_*_comentarios / b_*_devolutiva_revisao não encontrado em _temp/")
+    return bases[0], revs[0]

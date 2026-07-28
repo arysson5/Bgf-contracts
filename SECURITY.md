@@ -8,7 +8,7 @@ Aplicação **local/desktop** (Streamlit) para análise de contratos. Não é um
 
 - Contratos (PDF/DOCX) ficam em `contracts/` no disco.
 - Resultados de análise ficam em `contract_analyzer.db` (SQLite).
-- A chave `GOOGLE_API_KEY` fica **somente** no arquivo `.env` (nunca commitar).
+- A chave `OPENAI_API_KEY` fica **somente** no arquivo `.env` (nunca commitar).
 
 ## O que NÃO enviar ao GitHub
 
@@ -35,7 +35,7 @@ Aplicação **local/desktop** (Streamlit) para análise de contratos. Não é um
 ## Riscos conhecidos (aceitos no uso local)
 
 - Sem autenticação de usuário — quem acessar o Streamlit vê todos os contratos do banco local.
-- Texto do contrato é enviado à API Google Gemini para análise — revise os [termos da Google](https://ai.google.dev/terms).
+- Texto do contrato é enviado à API OpenAI para análise — revise os [termos da OpenAI](https://openai.com/policies/terms-of-use/).
 - Dados em repouso não são criptografados no SQLite.
 
 ## Reportar vulnerabilidades

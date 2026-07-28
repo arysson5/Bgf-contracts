@@ -18,6 +18,8 @@ def _hunk_embed_text(hunk: TextDiffHunk) -> str:
         return f"[ADICIONADO] {hunk.text_b or ''}"
     if hunk.change_type == "removed":
         return f"[REMOVIDO] {hunk.text_a or ''}"
+    if hunk.change_type == "moved":
+        return f"[MOVIDO] {hunk.text_b or hunk.text_a or ''}"
     return f"[ALTERADO] antes: {hunk.text_a or ''} | depois: {hunk.text_b or ''}"
 
 

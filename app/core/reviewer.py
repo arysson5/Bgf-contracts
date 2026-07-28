@@ -1,4 +1,4 @@
-"""Pipeline de revisão de comentários via Google Gemini — baseado em diff textual puro."""
+"""Pipeline de revisão de comentários via OpenAI — baseado em diff textual puro."""
 
 from __future__ import annotations
 

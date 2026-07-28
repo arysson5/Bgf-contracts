@@ -17,7 +17,7 @@ def main() -> None:
     print(torch_msg, "->", "OK" if torch_ok else "FALHA")
     try:
         ensure_runtime_ok()
-        print("\n[OK] Ambiente pronto para análises com Gemini.")
+        print("\n[OK] Ambiente pronto para análises com OpenAI.")
     except ValueError as exc:
         print(f"\n[FALHA] {exc}")
         raise SystemExit(1) from exc

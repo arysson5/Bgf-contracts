@@ -9,11 +9,12 @@ pdfplumber>=0.11.0
 pymupdf>=1.24.0
 # Extração via mammoth / pdfplumber / pymupdf (sem unstructured/torch)
 
-# AI e LLM (Google Gemini)
+# AI e LLM (OpenAI)
 langchain>=0.2.0
-langchain-google-genai>=2.0.0
+langchain-openai>=0.2.0
 langchain-core>=0.2.0
 langchain-text-splitters>=0.2.0
+openai>=1.40.0
 
 # Diff engine
 diff-match-patch>=20230430

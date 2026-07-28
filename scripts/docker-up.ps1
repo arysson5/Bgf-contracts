@@ -5,9 +5,9 @@ Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not (Test-Path ".env")) {
     if (Test-Path ".env.docker.example") {
         Copy-Item ".env.docker.example" ".env"
-        Write-Host "Arquivo .env criado a partir de .env.docker.example — edite GOOGLE_API_KEY antes de usar em producao."
+        Write-Host "Arquivo .env criado a partir de .env.docker.example — edite OPENAI_API_KEY antes de usar em producao."
     } else {
-        Write-Error "Crie um arquivo .env com GOOGLE_API_KEY (veja .env.docker.example)."
+        Write-Error "Crie um arquivo .env com OPENAI_API_KEY (veja .env.docker.example)."
     }
 }
 
