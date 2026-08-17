@@ -161,7 +161,7 @@ elif record.analysis_type == "diff":
 
 elif record.analysis_type == "text_diff":
     result = TextDiffResult.model_validate(data)
-    st.metric("Similaridade", f"{result.similarity_score:.0%}")
+    # Modo diff: sem Similaridade / métricas de IA — só contadores textuais.
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Adicionados", result.paragraphs_added)
     c2.metric("Removidos", result.paragraphs_removed)

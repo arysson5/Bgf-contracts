@@ -63,7 +63,7 @@ class TestTextDiffSynthetic:
         assert result.similarity_score < 1.0
         html = result.side_by_side_html or ""
         assert "especializada" in html or "multa" in html
-        assert any(h.change_type == "added" for h in changed)
+        assert any(h.change_type in ("added", "modified") for h in changed)
 
     def test_html_markers(self) -> None:
         html = get_html_diff(TEXT_A, TEXT_B)
@@ -116,6 +116,49 @@ class TestTextDiffSynthetic:
         assert result.paragraphs_added == 0
         assert result.paragraphs_removed == 0
         assert result.similarity_score == 1.0
+
+    def test_moved_despite_bullet_whitespace(self) -> None:
+        """Espaço após bullet / whitespace menor → Movido (ou Mesmo), não Removido+Novo."""
+        base = (
+            "Introdução.\n\n"
+            "• Valor em reais conforme anexo.\n\n"
+            "Cláusula final."
+        )
+        revised = (
+            "Introdução.\n\n"
+            "Cláusula final.\n\n"
+            "•Valor em reais conforme anexo."
+        )
+        result = compute_text_diff(base, revised)
+        assert result.paragraphs_added == 0
+        assert result.paragraphs_removed == 0
+        assert result.paragraphs_moved >= 1
+        # Conteúdo do bullet não pode aparecer como Novo/Removido
+        for h in result.hunks:
+            blob = f"{h.text_a or ''}{h.text_b or ''}"
+            if "reais" in blob:
+                assert h.change_type in ("moved", "unchanged")
+
+    def test_moved_despite_page_break_whitespace(self) -> None:
+        base = "Alpha bloco idêntico completo.\n\nBeta permanente.\n\nGamma."
+        # Espaços/tabs extras no mesmo conteúdo repositionado
+        revised = "Beta permanente.\n\nAlpha  bloco\tidêntico completo.\n\nGamma."
+        result = compute_text_diff(base, revised)
+        assert result.paragraphs_moved >= 1
+        assert result.paragraphs_added == 0
+        assert result.paragraphs_removed == 0
+
+    def test_short_token_reais_moved_not_added(self) -> None:
+        base = "Pagamento de mil reais.\n\nOutra cláusula.\n\nEncerramento."
+        revised = "Outra cláusula.\n\nPagamento de mil reais.\n\nEncerramento."
+        result = compute_text_diff(base, revised)
+        assert result.paragraphs_moved >= 1
+        assert result.paragraphs_added == 0
+        assert result.paragraphs_removed == 0
+        for h in result.hunks:
+            blob = f"{h.text_a or ''}{h.text_b or ''}"
+            if "reais" in blob:
+                assert h.change_type in ("moved", "unchanged")
 
 
 class TestTextDiffRealContracts:

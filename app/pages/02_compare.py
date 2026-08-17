@@ -176,9 +176,11 @@ def _render_contractual_results(
     st.caption(f"Modo executado: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
 
     try:
-        from app.utils.comment_balloons import close_comment_modal_overlay
+        # Só fecha overlay se balões foram injetados — evita iframe extra (removeChild no React).
+        if st.session_state.get("_bgf_comment_balloon_js_v4"):
+            from app.utils.comment_balloons import close_comment_modal_overlay
 
-        close_comment_modal_overlay()
+            close_comment_modal_overlay()
         if st.query_params.get("bgf_inc") or st.query_params.get("bgf_cmt"):
             st.query_params.clear()
     except Exception:
@@ -259,15 +261,29 @@ def _render_contractual_results(
             st.info("Nenhum comentário na versão base para verificar nesta comparação.")
 
     with tab_diff:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Alterações materiais", result.material_changes_count)
-        c2.metric("Alto risco", result.high_risk_count)
-        c3.metric("Similaridade", f"{result.similarity_score:.0%}" if result.similarity_score else "—")
-        c4.metric("Atenção", "Sim" if result.has_significant_changes else "Não")
-        if result.executive_summary:
-            st.info(result.executive_summary)
-        if result.recommendation:
-            st.success(result.recommendation)
+        is_plain_diff = analysis_mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS)
+        if is_plain_diff:
+            # Modo sem IA: só contadores do diff textual (sem métricas de materialidade/IA).
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Adicionados", text_diff.paragraphs_added if text_diff else 0)
+            c2.metric("Removidos", text_diff.paragraphs_removed if text_diff else 0)
+            c3.metric("Alterados", text_diff.paragraphs_modified if text_diff else 0)
+            c4.metric("Movidos", text_diff.paragraphs_moved if text_diff else 0)
+            if result.executive_summary:
+                st.info(result.executive_summary)
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Alterações materiais", result.material_changes_count)
+            c2.metric("Alto risco", result.high_risk_count)
+            c3.metric(
+                "Similaridade",
+                f"{result.similarity_score:.0%}" if result.similarity_score else "—",
+            )
+            c4.metric("Atenção", "Sim" if result.has_significant_changes else "Não")
+            if result.executive_summary:
+                st.info(result.executive_summary)
+            if result.recommendation:
+                st.success(result.recommendation)
         if text_diff and text_diff.inline_diff_html:
             with st.expander("Visão mesclada (inline)", expanded=False):
                 st.markdown(text_diff.inline_diff_html, unsafe_allow_html=True)
@@ -281,24 +297,39 @@ def _render_contractual_results(
                 path_new_type=type_b,
                 key_prefix="cmp_diff_blk",
             )
-        if not result.contractual_changes:
-            st.success("Nenhuma alteração material identificada entre as versões.")
-        for ch in result.contractual_changes:
-            icon = RISK_ICON.get(ch.risk_level, "•")
-            attn = " ⚠️" if ch.requires_attention else ""
-            with st.expander(f"{icon} {ch.clause_reference} — {ch.title}{attn}"):
-                st.write(ch.description)
-                st.caption(
-                    f"**Categoria:** {ch.category.value} | **Risco:** {ch.risk_level.value}"
-                )
-                if ch.legal_impact:
-                    st.write(f"**Impacto jurídico:** {ch.legal_impact}")
-                if ch.original_text:
-                    st.markdown("**Texto anterior:**")
-                    st.code(ch.original_text[:2000])
-                if ch.new_text:
-                    st.markdown("**Texto na versão revisada:**")
-                    st.code(ch.new_text[:2000])
+        if is_plain_diff:
+            content_n = (
+                (text_diff.paragraphs_added + text_diff.paragraphs_removed + text_diff.paragraphs_modified)
+                if text_diff
+                else len(result.contractual_changes or [])
+            )
+            if content_n == 0:
+                moved_n = text_diff.paragraphs_moved if text_diff else 0
+                if moved_n:
+                    st.success(
+                        f"Nenhuma alteração de conteúdo — apenas {moved_n} trecho(s) movido(s)."
+                    )
+                else:
+                    st.success("Nenhuma diferença textual entre as versões.")
+        else:
+            if not result.contractual_changes:
+                st.success("Nenhuma alteração material identificada entre as versões.")
+            for ch in result.contractual_changes:
+                icon = RISK_ICON.get(ch.risk_level, "•")
+                attn = " ⚠️" if ch.requires_attention else ""
+                with st.expander(f"{icon} {ch.clause_reference} — {ch.title}{attn}"):
+                    st.write(ch.description)
+                    st.caption(
+                        f"**Categoria:** {ch.category.value} | **Risco:** {ch.risk_level.value}"
+                    )
+                    if ch.legal_impact:
+                        st.write(f"**Impacto jurídico:** {ch.legal_impact}")
+                    if ch.original_text:
+                        st.markdown("**Texto anterior:**")
+                        st.code(ch.original_text[:2000])
+                    if ch.new_text:
+                        st.markdown("**Texto na versão revisada:**")
+                        st.code(ch.new_text[:2000])
 
     if save_version_id and st.button("Salvar análise", key="save_contractual"):
         if analysis_mode == AnalysisMode.TEXT_DIFF and text_diff:

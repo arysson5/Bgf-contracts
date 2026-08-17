@@ -58,9 +58,15 @@ _ENABLE_JS = """
 """
 
 
+_SYNC_SCROLL_INJECTED_KEY = "_bgf_sync_scroll_handler_injected"
+
+
 def ensure_sync_scroll_handler() -> None:
-    """Registra/atualiza listener de Shift+roda no documento pai."""
+    """Registra listener de Shift+roda uma vez por sessão (evita removeChild no React)."""
+    if st.session_state.get(_SYNC_SCROLL_INJECTED_KEY):
+        return
     components.html(_SYNC_SCROLL_JS, height=0, scrolling=False)
+    st.session_state[_SYNC_SCROLL_INJECTED_KEY] = True
 
 
 def render_sync_scroll_controls(*, key: str = "bgf_sync_scroll") -> bool:

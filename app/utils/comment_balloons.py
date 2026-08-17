@@ -638,7 +638,12 @@ _CLOSE_MODAL_JS = """
 
 
 def close_comment_modal_overlay() -> None:
-    """Fecha overlay do modal (evita tela esbranquiçada após rerun)."""
+    """Fecha overlay do modal (evita tela esbranquiçada após rerun).
+
+    Só injeta o iframe se o handler de balões já existir — reduz removeChild no React.
+    """
+    if not st.session_state.get(_INJECTED_BALLOON_KEY):
+        return
     components.html(_CLOSE_MODAL_JS, height=0, scrolling=False)
 
 

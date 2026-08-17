@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import difflib
 import html
+import re
+import unicodedata
 import uuid
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 
-from diff_match_patch import diff_match_patch
-
 from app.core.extractor import normalize_text
 from app.models.schemas import TextDiffHunk, TextDiffResult
 
-DMP = diff_match_patch()
-_PARA_SEP = "\x1e"
+# Apenas chave normalizada idêntica conta como move (sem fuzzy de edição real).
+_BULLET_CHARS = r"[•●▪◦‣⁃∙·\*]"
+_MATCH_WS_RE = re.compile(r"\s+")
+_MATCH_BULLET_RE = re.compile(rf"{_BULLET_CHARS}\s*")
+_MATCH_PAGEBREAK_RE = re.compile(r"[\f\u000c]+")
 
 _DIFF_CSS = """
 <style>
@@ -48,14 +51,29 @@ def _paragraphs(text: str) -> list[str]:
     return parts if parts else [norm]
 
 
-def _join_paragraphs(parts: list[str]) -> str:
-    return _PARA_SEP.join(parts)
+def _match_key(text: str) -> str:
+    """
+    Chave conservadora para parear trechos movidos.
+    Colapsa whitespace/quebra de página e normaliza bullets, sem casefold
+    (mudança de maiúsculas continua sendo alteração real).
+    """
+    if not text:
+        return ""
+    t = unicodedata.normalize("NFKC", text)
+    t = _MATCH_PAGEBREAK_RE.sub(" ", t)
+    t = _MATCH_BULLET_RE.sub("• ", t)
+    t = _MATCH_WS_RE.sub(" ", t)
+    return t.strip()
 
 
-def _split_joined(joined: str) -> list[str]:
-    if not joined:
-        return []
-    return [p for p in joined.split(_PARA_SEP) if p]
+def _texts_essentially_same(a: str, b: str) -> bool:
+    """True se o conteúdo é o mesmo após normalização conservadora de whitespace/bullet."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    ka, kb = _match_key(a), _match_key(b)
+    return bool(ka) and ka == kb
 
 
 def _escape_para(text: str) -> str:
@@ -76,23 +94,43 @@ def _new_hunk(
     )
 
 
-def _emit_rem_add_block(rem_parts: list[str], add_parts: list[str]) -> list[TextDiffHunk]:
-    """
-    Converte um bloco rem+add do DMP em hunks.
-    Parágrafos com texto idêntico viram 'moved'; o restante é pareado como modified/rem/add.
-    """
-    add_by_text: dict[str, deque[int]] = defaultdict(deque)
+def _pair_near_moves(
+    rem_parts: list[str],
+    add_parts: list[str],
+    move_rem: set[int],
+    move_add: set[int],
+) -> None:
+    """Pareia rem↔add com a mesma chave normalizada (in-place)."""
+    add_by_key: dict[str, deque[int]] = defaultdict(deque)
     for j, text in enumerate(add_parts):
-        add_by_text[text].append(j)
+        if j in move_add:
+            continue
+        add_by_key[_match_key(text) or text].append(j)
 
-    move_rem: set[int] = set()
-    move_add: set[int] = set()
     for i, text in enumerate(rem_parts):
-        queue = add_by_text.get(text)
+        if i in move_rem:
+            continue
+        key = _match_key(text) or text
+        queue = add_by_key.get(key)
+        if not queue:
+            continue
+        while queue and queue[0] in move_add:
+            queue.popleft()
         if queue:
             j = queue.popleft()
             move_rem.add(i)
             move_add.add(j)
+
+
+def _emit_rem_add_block(rem_parts: list[str], add_parts: list[str]) -> list[TextDiffHunk]:
+    """
+    Converte um bloco rem+add em hunks.
+    Parágrafos com conteúdo essencialmente igual viram 'moved';
+    o restante é pareado como modified/rem/add.
+    """
+    move_rem: set[int] = set()
+    move_add: set[int] = set()
+    _pair_near_moves(rem_parts, add_parts, move_rem, move_add)
 
     out: list[TextDiffHunk] = []
     rem_queue: list[str] = []
@@ -115,7 +153,7 @@ def _emit_rem_add_block(rem_parts: list[str], add_parts: list[str]) -> list[Text
         ra = rem_queue[k] if k < len(rem_queue) else None
         rb = add_queue[k] if k < len(add_queue) else None
         if ra and rb:
-            if ra == rb:
+            if _texts_essentially_same(ra, rb):
                 out.append(_new_hunk("moved", text_a=ra))
                 out.append(_new_hunk("moved", text_b=rb))
             else:
@@ -127,32 +165,13 @@ def _emit_rem_add_block(rem_parts: list[str], add_parts: list[str]) -> list[Text
     return out
 
 
-def _detect_moved_paragraphs(hunks: list[TextDiffHunk]) -> list[TextDiffHunk]:
-    """Pareia removed↔added com texto idêntico e reclassifica como moved (sem IA)."""
-    added_by_text: dict[str, deque[int]] = defaultdict(deque)
-    for i, h in enumerate(hunks):
-        if h.change_type == "added" and h.text_b:
-            added_by_text[h.text_b].append(i)
-
-    used_added: set[int] = set()
-    used_removed: set[int] = set()
-    for i, h in enumerate(hunks):
-        if h.change_type != "removed" or not h.text_a:
-            continue
-        queue = added_by_text.get(h.text_a)
-        if not queue:
-            continue
-        while queue and queue[0] in used_added:
-            queue.popleft()
-        if not queue:
-            continue
-        j = queue.popleft()
-        used_added.add(j)
-        used_removed.add(i)
-
+def _reclassify_as_moved(
+    hunks: list[TextDiffHunk],
+    used_removed: set[int],
+    used_added: set[int],
+) -> list[TextDiffHunk]:
     if not used_removed:
         return hunks
-
     out: list[TextDiffHunk] = []
     for i, h in enumerate(hunks):
         if i in used_removed:
@@ -178,6 +197,24 @@ def _detect_moved_paragraphs(hunks: list[TextDiffHunk]) -> list[TextDiffHunk]:
     return out
 
 
+def _detect_moved_paragraphs(hunks: list[TextDiffHunk]) -> list[TextDiffHunk]:
+    """Pareia removed↔added com conteúdo essencialmente igual → moved (sem IA)."""
+    rem_idx = [i for i, h in enumerate(hunks) if h.change_type == "removed" and h.text_a]
+    add_idx = [i for i, h in enumerate(hunks) if h.change_type == "added" and h.text_b]
+    if not rem_idx or not add_idx:
+        return hunks
+
+    rem_parts = [hunks[i].text_a or "" for i in rem_idx]
+    add_parts = [hunks[i].text_b or "" for i in add_idx]
+    move_rem_local: set[int] = set()
+    move_add_local: set[int] = set()
+    _pair_near_moves(rem_parts, add_parts, move_rem_local, move_add_local)
+
+    used_removed = {rem_idx[i] for i in move_rem_local}
+    used_added = {add_idx[j] for j in move_add_local}
+    return _reclassify_as_moved(hunks, used_removed, used_added)
+
+
 def _count_change_types(hunks: list[TextDiffHunk]) -> tuple[int, int, int, int]:
     added = removed = modified = 0
     moved_from = moved_to = 0
@@ -194,11 +231,9 @@ def _count_change_types(hunks: list[TextDiffHunk]) -> tuple[int, int, int, int]:
             elif h.text_b and not h.text_a:
                 moved_to += 1
             else:
-                # hunk único com ambos os lados — conta como 1 par
                 moved_from += 1
                 moved_to += 1
     moved = min(moved_from, moved_to) if (moved_from or moved_to) else 0
-    # se só um lado sobrar (inconsistência), ainda reporta o máximo coerente
     if moved == 0 and (moved_from or moved_to):
         moved = max(moved_from, moved_to)
     return added, removed, modified, moved
@@ -212,36 +247,36 @@ def compute_text_diff(
     label_a: str = "Base",
     label_b: str = "Revisada",
 ) -> TextDiffResult:
-    """Diff em nível de parágrafo com diff-match-patch + detecção de moves."""
+    """Diff em nível de parágrafo com SequenceMatcher + detecção intensificada de moves.
+
+    Alinha parágrafos por chave normalizada (whitespace/bullet/quebra de página) para
+    evitar falsos Removido+Novo quando o DMP fragmentava no nível de caractere.
+    """
     pa = _paragraphs(text_a)
     pb = _paragraphs(text_b)
-    joined_a = _join_paragraphs(pa)
-    joined_b = _join_paragraphs(pb)
-
-    diffs = DMP.diff_main(joined_a, joined_b)
-    DMP.diff_cleanupSemantic(diffs)
+    pa_keys = [_match_key(p) for p in pa]
+    pb_keys = [_match_key(p) for p in pb]
+    matcher = difflib.SequenceMatcher(None, pa_keys, pb_keys, autojunk=False)
 
     hunks: list[TextDiffHunk] = []
-    i = 0
-    while i < len(diffs):
-        op, chunk = diffs[i]
-        if op == 0:
-            for para in _split_joined(chunk):
-                hunks.append(_new_hunk("unchanged", text_a=para, text_b=para))
-            i += 1
-        elif op == -1 and i + 1 < len(diffs) and diffs[i + 1][0] == 1:
-            rem_parts = _split_joined(diffs[i][1])
-            add_parts = _split_joined(diffs[i + 1][1])
-            hunks.extend(_emit_rem_add_block(rem_parts, add_parts))
-            i += 2
-        elif op == -1:
-            for para in _split_joined(chunk):
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for k in range(i2 - i1):
+                hunks.append(
+                    _new_hunk(
+                        "unchanged",
+                        text_a=pa[i1 + k],
+                        text_b=pb[j1 + k],
+                    )
+                )
+        elif tag == "replace":
+            hunks.extend(_emit_rem_add_block(pa[i1:i2], pb[j1:j2]))
+        elif tag == "delete":
+            for para in pa[i1:i2]:
                 hunks.append(_new_hunk("removed", text_a=para))
-            i += 1
-        else:
-            for para in _split_joined(chunk):
+        else:  # insert
+            for para in pb[j1:j2]:
                 hunks.append(_new_hunk("added", text_b=para))
-            i += 1
 
     hunks = _detect_moved_paragraphs(hunks)
     added, removed, modified, moved = _count_change_types(hunks)
@@ -315,7 +350,6 @@ def paragraph_diff_hunks(
             for k in range(span):
                 ra = pa[i1 + k] if i1 + k < i2 else None
                 rb = pb[j1 + k] if j1 + k < j2 else None
-                # Contexto só no primeiro/último item do span para não repetir
                 before_a = ctx_before_a if k == 0 else ""
                 after_a = ctx_after_a if k == span - 1 else ""
                 before_b = ctx_before_b if k == 0 else ""
@@ -455,9 +489,10 @@ def render_side_by_side_html(
     right_parts: list[str] = []
     for h in hunks:
         if h.change_type == "unchanged":
-            esc = _escape_para(h.text_a or "")
-            left_parts.append(f'<span class="bgf-diff-same">{esc}</span>')
-            right_parts.append(f'<span class="bgf-diff-same">{esc}</span>')
+            left_parts.append(f'<span class="bgf-diff-same">{_escape_para(h.text_a or "")}</span>')
+            right_parts.append(
+                f'<span class="bgf-diff-same">{_escape_para(h.text_b or h.text_a or "")}</span>'
+            )
         elif h.change_type == "removed":
             left_parts.append(f'<span class="bgf-diff-removed">{_escape_para(h.text_a or "")}</span>')
         elif h.change_type == "added":

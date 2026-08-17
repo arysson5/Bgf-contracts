@@ -823,22 +823,36 @@ def compare_contracts(
     if mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS):
         if progress_callback:
             progress_callback(3, 3, "Diff concluído (sem IA)")
+        # Sem métricas de IA (similaridade material, atenção). Só contadores do diff.
         summary = (
             f"Diff textual: {text_diff.paragraphs_added} adicionados, "
             f"{text_diff.paragraphs_removed} removidos, "
             f"{text_diff.paragraphs_modified} alterados, "
-            f"{text_diff.paragraphs_moved} movidos. "
-            f"Similaridade: {text_diff.similarity_score:.0%}."
+            f"{text_diff.paragraphs_moved} movidos."
         )
-        return _result_from_hunks(
-            hunks,
+        content_changes = [
+            h
+            for h in hunks
+            if h.change_type in ("added", "removed", "modified")
+        ]
+        # Moves não são "alterações materiais" no modo sem IA — só rem/add/mod.
+        changes = hunks_to_contractual_changes(content_changes)
+        for ch in changes:
+            ch.requires_attention = False
+            ch.risk_level = ChangeRisk.LOW
+            ch.legal_impact = "Alteração textual (modo diff, sem classificação de risco)."
+        return ContractDiffResult(
             contract_id=contract_id,
-            label_a=label_a,
-            label_b=label_b,
+            version_a_label=label_a,
+            version_b_label=label_b,
             executive_summary=summary,
             recommendation="",
-            changes=hunks_to_contractual_changes(hunks),
-            similarity=text_diff.similarity_score,
+            material_changes_count=0,
+            high_risk_count=0,
+            has_significant_changes=bool(content_changes),
+            contractual_changes=changes,
+            summary=summary,
+            similarity_score=text_diff.similarity_score,
         )
 
     if mode == AnalysisMode.VALIDACAO:
