@@ -52,6 +52,7 @@ from app.utils.active_contract import (
 from app.utils.ui import (
     render_compare_version_pair,
     render_contract_browse_selector,
+    render_upload_format_notice,
     save_temp_upload,
     save_uploaded_file,
 )
@@ -175,30 +176,40 @@ def _render_contractual_results(
     section_title("Resultado")
     st.caption(f"Modo executado: **{_MODE_UI_LABELS.get(analysis_mode, analysis_mode.value)}**")
 
-    try:
-        # Só fecha overlay se balões foram injetados — evita iframe extra (removeChild no React).
-        if st.session_state.get("_bgf_comment_balloon_js_v4"):
-            from app.utils.comment_balloons import close_comment_modal_overlay
+    from app.utils.comment_actions_ui import consume_comment_query_actions
 
-            close_comment_modal_overlay()
-        if st.query_params.get("bgf_inc") or st.query_params.get("bgf_cmt"):
-            st.query_params.clear()
-    except Exception:
-        pass
+    consume_comment_query_actions()
 
     if version_new:
-        from app.utils.export_ui import get_annotated_work_path, render_prominent_save_cta
+        from app.utils.comment_actions_ui import (
+            render_accept_and_save_bar,
+            render_open_comment_dialogs,
+        )
 
-        if (
-            get_annotated_work_path(version_new)
-            or st.session_state.get("bgf_show_save_cta") == version_new.id
-        ):
-            render_prominent_save_cta(
+        if analysis_mode == AnalysisMode.CRITERIOSA:
+            render_open_comment_dialogs(
+                comment_verification.reviews if comment_verification else None,
                 version_new,
-                key_prefix="cmp_save_banner",
-                message="Comentário incluído no arquivo revisado. **Salve o PDF/DOCX** no seu computador:",
+            )
+            render_accept_and_save_bar(
+                comment_verification.reviews if comment_verification else None,
+                version_new,
+                key_prefix="cmp_act",
             )
             st.divider()
+        else:
+            from app.utils.export_ui import get_annotated_work_path, render_prominent_save_cta
+
+            if (
+                get_annotated_work_path(version_new)
+                or st.session_state.get("bgf_show_save_cta") == version_new.id
+            ):
+                render_prominent_save_cta(
+                    version_new,
+                    key_prefix="cmp_save_banner",
+                    message="Comentário incluído no arquivo revisado. **Salve o PDF/DOCX** no seu computador:",
+                )
+                st.divider()
 
     tab_docs, tab_comments, tab_diff = st.tabs(
         ["Documentos lado a lado", "Comentários", "Alterações"]
@@ -208,15 +219,13 @@ def _render_contractual_results(
     if not diff_html and analysis_mode in (AnalysisMode.TEXT_DIFF, AnalysisMode.DIFERENCAS):
         diff_html = result.executive_summary  # fallback
 
-    # Balões pesados (PDF página a página) só na Criteriosa, onde há análise IA dos comentários.
+    # Balões + clique direito no arquivo mais recente (B) na Criteriosa.
     show_comment_balloons = (
         analysis_mode == AnalysisMode.CRITERIOSA
-        and comment_verification is not None
-        and comment_verification.total_comments > 0
+        and bool(path_a and path_b and version_new)
     )
 
     with tab_docs:
-        ensure_sync_scroll_handler()
         if path_a and path_b:
             render_side_by_side_documents(
                 path_a,
@@ -228,12 +237,15 @@ def _render_contractual_results(
                 changes=result.contractual_changes,
                 text_diff_html=diff_html if not show_comment_balloons else None,
                 comment_reviews=(
-                    comment_verification.reviews if show_comment_balloons else None
+                    (comment_verification.reviews if comment_verification else [])
+                    if show_comment_balloons
+                    else None
                 ),
                 new_version=version_new if show_comment_balloons else None,
                 key_prefix="cmp_sbs",
             )
         elif text_diff and text_diff.side_by_side_html:
+            ensure_sync_scroll_handler()
             st.markdown(text_diff.side_by_side_html, unsafe_allow_html=True)
             sync_scroll_hint()
         else:
@@ -719,10 +731,12 @@ def _diff_hybrid_last_vs_upload() -> None:
         else:
             st.warning("Nenhum comentário detectado nesta versão.")
 
+    render_upload_format_notice()
     file_b = st.file_uploader(
-        "Versão revisada do cliente (PDF ou DOCX)",
+        "Versão revisada do cliente (PDF ou DOCX — não .doc)",
         type=["pdf", "docx"],
         key="hybrid_new_file",
+        help="Aceita apenas .pdf e .docx. Arquivos .doc devem ser convertidos para .docx.",
     )
     default_label = st.session_state.get("upload_version_label_default", "Versão revisada")
     label_b = st.text_input("Nome da revisão", value=default_label, key="hybrid_new_label")
@@ -819,19 +833,22 @@ def _diff_hybrid_last_vs_upload() -> None:
 
 
 def _diff_quick_two_uploads() -> None:
+    render_upload_format_notice()
     c1, c2 = st.columns(2)
     with c1:
         file_a = st.file_uploader(
-            "Com comentários (PDF ou DOCX)",
+            "Com comentários (PDF ou DOCX — não .doc)",
             type=["pdf", "docx"],
             key="quick_a",
+            help="Aceita apenas .pdf e .docx. Arquivos .doc devem ser convertidos para .docx.",
         )
         label_a = st.text_input("Nome", value="Com comentários", key="ql_a")
     with c2:
         file_b = st.file_uploader(
-            "Revisado (PDF ou DOCX)",
+            "Revisado (PDF ou DOCX — não .doc)",
             type=["pdf", "docx"],
             key="quick_b",
+            help="Aceita apenas .pdf e .docx. Arquivos .doc devem ser convertidos para .docx.",
         )
         label_b = st.text_input("Nome", value="Versão revisada", key="ql_b")
 

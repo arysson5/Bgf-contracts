@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from app.core import extractor
 from app.core.comment_suggester import review_needs_reinforcement, suggest_reinforcement
@@ -21,8 +20,8 @@ from app.utils.comments_ui import (
 )
 from app.utils.pdf_ui import page_count_cached, render_page_image_cached
 from app.utils.sync_scroll import (
-    ensure_sync_scroll_handler,
     render_sync_scroll_controls,
+    sync_scroll_classes,
 )
 
 _ZOOM = 1.2
@@ -39,14 +38,25 @@ _BALLOON_CSS = """
 .bgf-sbs-outer { margin: 4px 0 8px; }
 .bgf-sbs-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  align-items: start;
 }
 .bgf-sbs-col {
   border: 1px solid #D6E2F0; border-radius: 8px; background: #fff;
-  max-height: 72vh; overflow-y: auto; padding: 10px 12px;
+  max-height: 72vh; overflow-y: auto; overflow-x: hidden;
+  padding: 10px 12px; overscroll-behavior: contain;
 }
+.bgf-sbs-col.bgf-comment-target { box-shadow: inset 0 0 0 2px #0A3D7A33; }
 .bgf-sbs-col h4 { margin: 0 0 10px; font-size: 0.95rem; color: #0A3D7A; }
+.bgf-docx-col.bgf-comment-target .bgf-docx-p,
+.bgf-docx-col.bgf-comment-target .bgf-docx-balloon-row { cursor: context-menu; }
+.bgf-docx-col.bgf-comment-target .bgf-docx-p:hover { background: #E8F1FB; }
 .bgf-page-wrap { position: relative; margin-bottom: 10px; line-height: 0; }
 .bgf-page-wrap img { width: 100%; height: auto; display: block; border-radius: 4px; }
+.bgf-page-wrap[data-bgf-role="target"] { cursor: crosshair; }
+.bgf-sel-rect {
+  position: absolute; background: rgba(10,61,122,.18);
+  border: 1px dashed #0A3D7A; pointer-events: none; z-index: 4;
+}
 .bgf-balloon {
   position: absolute; width: 28px; height: 28px; border: 2px solid #fff;
   border-radius: 6px 6px 6px 2px; cursor: pointer; z-index: 5;
@@ -87,6 +97,12 @@ _BALLOON_CSS = """
 .bgf-cmt-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
 </style>
 """
+
+_COL_INLINE_STYLE = (
+    "max-height:72vh;overflow-y:auto;overflow-x:hidden;"
+    "border:1px solid #D6E2F0;border-radius:8px;padding:10px 12px;"
+    "background:#fff;overscroll-behavior:contain;"
+)
 
 _BALLOON_SVG = (
     '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">'
@@ -321,16 +337,16 @@ def _pdf_column_html(
     sync_group: str,
     show_markers: bool,
     render_all_pages: bool = False,
+    is_target: bool = False,
 ) -> str:
     total = page_count_cached(file_path)
     markers_by_page: dict[int, list[_CommentMarker]] = {}
     for m in markers or []:
         markers_by_page.setdefault(m.page, []).append(m)
 
-    # Por padrão só renderiza páginas com balões (+ vizinhos), bem mais rápido em PDFs longos.
-    if render_all_pages or not markers_by_page:
+    if render_all_pages:
         page_nums = list(range(1, total + 1))
-    else:
+    elif markers_by_page:
         wanted: set[int] = set()
         for p in markers_by_page:
             for d in (-1, 0, 1):
@@ -338,7 +354,11 @@ def _pdf_column_html(
                 if 1 <= n <= total:
                     wanted.add(n)
         page_nums = sorted(wanted)
+    else:
+        page_nums = list(range(1, min(total, 3) + 1))
 
+    role = "target" if is_target else "base"
+    target_cls = " bgf-comment-target" if is_target else ""
     pages: list[str] = []
     for p in page_nums:
         try:
@@ -352,8 +372,9 @@ def _pdf_column_html(
                 overlays += _highlight_rect_html(mk)
                 overlays += _balloon_btn(mk)
         pages.append(
-            f'<div class="bgf-page-wrap"><img src="data:image/png;base64,{b64}" '
-            f'alt="Página {p}"/>{overlays}</div>'
+            f'<div class="bgf-page-wrap{target_cls}" data-bgf-role="{role}" '
+            f'data-bgf-page="{p}" data-bgf-kind="pdf">'
+            f'<img src="data:image/png;base64,{b64}" alt="Página {p}"/>{overlays}</div>'
         )
 
     skipped = total - len(page_nums)
@@ -361,14 +382,21 @@ def _pdf_column_html(
     if skipped > 0:
         note = (
             f'<p style="font-size:0.8rem;color:#64748b;margin:0 0 8px;">'
-            f"Mostrando {len(page_nums)} de {total} páginas "
-            f"(com comentários ou vizinhas). Ative "
-            f"<em>Documento completo</em> abaixo para renderizar todas.</p>"
+            f"Mostrando {len(page_nums)} de {total} páginas. Ative "
+            f"<em>Documento completo</em> para renderizar todas.</p>"
+        )
+    if is_target:
+        note += (
+            '<p style="font-size:0.8rem;color:#0A3D7A;margin:0 0 8px;">'
+            "Botão direito neste documento para comentar no ponto. "
+            "Arraste para marcar um trecho e depois clique com o direito.</p>"
         )
 
     body = "".join(pages) or "<em>Sem páginas</em>"
     return (
-        f'<div class="bgf-sbs-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
+        f'<div class="bgf-sbs-col {sync_scroll_classes(sync_group)}{target_cls}" '
+        f'style="{_COL_INLINE_STYLE}" '
+        f'data-sync-group="{html.escape(sync_group)}" data-bgf-role="{role}">'
         f"<h4>{html.escape(label)}</h4>{note}{body}</div>"
     )
 
@@ -380,6 +408,7 @@ def _docx_column_html(
     *,
     sync_group: str,
     show_markers: bool,
+    is_target: bool = False,
 ) -> str:
     from app.core.docx_viewer import iter_docx_paragraph_texts
 
@@ -390,7 +419,15 @@ def _docx_column_html(
             if m.paragraph_index is not None:
                 marker_by_para[m.paragraph_index] = m
 
+    role = "target" if is_target else "base"
+    target_cls = " bgf-comment-target" if is_target else ""
     rows: list[str] = []
+    if is_target:
+        rows.append(
+            '<p style="font-size:0.8rem;color:#0A3D7A;margin:0 0 8px;">'
+            "Clique com o <strong>botão direito</strong> em um parágrafo "
+            "(ou selecione um trecho) para comentar neste ponto.</p>"
+        )
     for idx, text in enumerate(paragraphs):
         mk = marker_by_para.get(idx)
         text = (text or "").strip()
@@ -399,6 +436,12 @@ def _docx_column_html(
         if not text and mk is None:
             continue
         safe = html.escape(text or "(sem trecho visível no documento)")
+        para_cls = f"bgf-para-idx-{idx}"
+        attrs = (
+            f'class="bgf-docx-p {para_cls}{target_cls}" '
+            f'data-bgf-role="{role}" data-bgf-para="{idx}" data-bgf-kind="docx" '
+            f'data-bgf-page="{idx + 1}"'
+        )
         if mk:
             status_val = mk.status.value
             balloon = _balloon_btn(mk).replace(
@@ -406,19 +449,25 @@ def _docx_column_html(
                 'style="position:absolute;left:0;top:4px;"',
             )
             rows.append(
-                f'<div class="bgf-docx-balloon-row bgf-hl-{status_val}" '
-                f'data-cmt-id="{html.escape(mk.comment_id)}">'
+                f'<div class="bgf-docx-balloon-row bgf-hl-{status_val} {para_cls}{target_cls}" '
+                f'data-cmt-id="{html.escape(mk.comment_id)}" '
+                f'data-bgf-role="{role}" data-bgf-para="{idx}" data-bgf-kind="docx" '
+                f'data-bgf-page="{idx + 1}">'
                 f"{balloon}<div class=\"bgf-docx-text\">{safe}</div></div>"
             )
         else:
-            rows.append(f'<p style="margin:6px 0;line-height:1.55;">{safe}</p>')
+            rows.append(
+                f'<div {attrs} style="margin:6px 0;line-height:1.55;">{safe}</div>'
+            )
 
-    if not rows:
+    if len(rows) <= (1 if is_target else 0):
         rows.append("<em>Documento vazio</em>")
 
     body = "".join(rows)
     return (
-        f'<div class="bgf-sbs-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
+        f'<div class="bgf-sbs-col {sync_scroll_classes(sync_group)} bgf-docx-col{target_cls}" '
+        f'style="{_COL_INLINE_STYLE}" '
+        f'data-sync-group="{html.escape(sync_group)}" data-bgf-role="{role}" data-bgf-kind="docx">'
         f"<h4>{html.escape(label)}</h4>{body}</div>"
     )
 
@@ -432,6 +481,7 @@ def _column_html(
     sync_group: str,
     show_markers: bool,
     render_all_pages: bool = False,
+    is_target: bool = False,
 ) -> str:
     ft = file_type.lower() if file_type else Path(file_path).suffix.lower().lstrip(".")
     if ft == "pdf":
@@ -442,13 +492,19 @@ def _column_html(
             sync_group=sync_group,
             show_markers=show_markers,
             render_all_pages=render_all_pages,
+            is_target=is_target,
         )
     if ft in ("docx", "doc"):
         return _docx_column_html(
-            file_path, label, markers, sync_group=sync_group, show_markers=show_markers
+            file_path,
+            label,
+            markers,
+            sync_group=sync_group,
+            show_markers=show_markers,
+            is_target=is_target,
         )
     return (
-        f'<div class="bgf-sbs-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
+        f'<div class="bgf-sbs-col {sync_scroll_classes(sync_group)}">'
         f"<h4>{html.escape(label)}</h4><em>Formato não suportado</em></div>"
     )
 
@@ -474,18 +530,29 @@ def _reviews_payload(reviews: list[CommentReview]) -> str:
     return json.dumps(items, ensure_ascii=False)
 
 
-_BALLOON_JS = """
+_UNUSED_LEGACY_BALLOON_JS = """
 <script>
 (function () {
   const doc = window.parent.document;
   const css = __BGF_CSS__;
   doc.__bgfCommentsData = __BGF_DATA__;
 
-  if (css && !doc.getElementById("bgf-cmt-modal-styles")) {
-    const style = doc.createElement("style");
+  let style = doc.getElementById("bgf-cmt-modal-styles");
+  if (!style) {
+    style = doc.createElement("style");
     style.id = "bgf-cmt-modal-styles";
-    style.textContent = css;
     doc.head.appendChild(style);
+  }
+  if (css) style.textContent = css;
+
+  function setQuery(params) {
+    const url = new URL(window.parent.location.href);
+    Object.keys(params).forEach(function (k) {
+      const v = params[k];
+      if (v === null || v === undefined || v === "") url.searchParams.delete(k);
+      else url.searchParams.set(k, String(v));
+    });
+    window.parent.location.href = url.pathname + url.search + url.hash;
   }
 
   function ensureModal() {
@@ -576,6 +643,18 @@ _BALLOON_JS = """
   if (doc.__bgfCmtClickHandler) {
     try { doc.removeEventListener("click", doc.__bgfCmtClickHandler, true); } catch (err) {}
   }
+  if (doc.__bgfCmtCtxHandler) {
+    try { doc.removeEventListener("contextmenu", doc.__bgfCmtCtxHandler, true); } catch (err) {}
+  }
+  if (doc.__bgfCmtDownHandler) {
+    try { doc.removeEventListener("mousedown", doc.__bgfCmtDownHandler, true); } catch (err) {}
+  }
+  if (doc.__bgfCmtMoveHandler) {
+    try { doc.removeEventListener("mousemove", doc.__bgfCmtMoveHandler, true); } catch (err) {}
+  }
+  if (doc.__bgfCmtUpHandler) {
+    try { doc.removeEventListener("mouseup", doc.__bgfCmtUpHandler, true); } catch (err) {}
+  }
 
   doc.__bgfCmtClickHandler = function (e) {
     const t = e.target;
@@ -584,14 +663,180 @@ _BALLOON_JS = """
     if (!btn) return;
     e.preventDefault();
     e.stopPropagation();
-    openModal(btn.getAttribute("data-cmt-id"));
+    setQuery({ bgf_cmt: btn.getAttribute("data-cmt-id") });
   };
   doc.addEventListener("click", doc.__bgfCmtClickHandler, true);
+
+  function pctOnImg(e, img) {
+    const r = img.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const x = ((e.clientX - r.left) / r.width) * 100;
+    const y = ((e.clientY - r.top) / r.height) * 100;
+    return { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+  }
+  function clearSel(wrap) {
+    if (!wrap) return;
+    const old = wrap.querySelector(".bgf-sel-rect");
+    if (old) old.remove();
+    delete wrap.dataset.selX0;
+    delete wrap.dataset.selY0;
+    delete wrap.dataset.selX1;
+    delete wrap.dataset.selY1;
+  }
+  let drag = null;
+  doc.__bgfCmtDownHandler = function (e) {
+    if (e.button !== 0) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest(".bgf-balloon")) return;
+    const wrap = t.closest('.bgf-page-wrap[data-bgf-role="target"]');
+    if (!wrap) return;
+    const img = wrap.querySelector("img");
+    if (!img) return;
+    const p = pctOnImg(e, img);
+    if (!p) return;
+    drag = { wrap: wrap, start: p };
+    clearSel(wrap);
+    e.preventDefault();
+  };
+  doc.__bgfCmtMoveHandler = function (e) {
+    if (!drag) return;
+    const img = drag.wrap.querySelector("img");
+    const p = pctOnImg(e, img);
+    if (!p) return;
+    let box = drag.wrap.querySelector(".bgf-sel-rect");
+    if (!box) {
+      box = doc.createElement("div");
+      box.className = "bgf-sel-rect";
+      drag.wrap.appendChild(box);
+    }
+    const x0 = Math.min(drag.start.x, p.x);
+    const y0 = Math.min(drag.start.y, p.y);
+    const x1 = Math.max(drag.start.x, p.x);
+    const y1 = Math.max(drag.start.y, p.y);
+    box.style.left = x0 + "%";
+    box.style.top = y0 + "%";
+    box.style.width = (x1 - x0) + "%";
+    box.style.height = (y1 - y0) + "%";
+  };
+  doc.__bgfCmtUpHandler = function (e) {
+    if (!drag) return;
+    const img = drag.wrap.querySelector("img");
+    const p = pctOnImg(e, img) || drag.start;
+    const x0 = Math.min(drag.start.x, p.x);
+    const y0 = Math.min(drag.start.y, p.y);
+    const x1 = Math.max(drag.start.x, p.x);
+    const y1 = Math.max(drag.start.y, p.y);
+    if ((x1 - x0) > 1.2 && (y1 - y0) > 1.0) {
+      drag.wrap.dataset.selX0 = x0.toFixed(2);
+      drag.wrap.dataset.selY0 = y0.toFixed(2);
+      drag.wrap.dataset.selX1 = x1.toFixed(2);
+      drag.wrap.dataset.selY1 = y1.toFixed(2);
+    } else {
+      clearSel(drag.wrap);
+    }
+    drag = null;
+  };
+  doc.addEventListener("mousedown", doc.__bgfCmtDownHandler, true);
+  doc.addEventListener("mousemove", doc.__bgfCmtMoveHandler, true);
+  doc.addEventListener("mouseup", doc.__bgfCmtUpHandler, true);
+
+  doc.__bgfCmtCtxHandler = function (e) {
+    let t = e.target;
+    if (t && t.nodeType === 3) t = t.parentElement;
+    if (!t || !t.closest) return;
+
+    function paraIdx(el) {
+      if (!el) return "";
+      const m = String(el.className || "").match(/bgf-para-idx-(\\d+)/);
+      if (m) return m[1];
+      return el.getAttribute("data-bgf-para") || "";
+    }
+
+    const docxEl = t.closest(".bgf-docx-p, .bgf-docx-balloon-row, .bgf-docx-text");
+    const pageWrap = t.closest(".bgf-page-wrap.bgf-comment-target");
+    const docxCol = t.closest(".bgf-docx-col.bgf-comment-target");
+    let kind = "";
+    let page = "1";
+    let para = "";
+    let host = null;
+
+    if (docxEl || docxCol) {
+      kind = "docx";
+      let anchor = docxEl
+        ? (docxEl.classList.contains("bgf-docx-text") ? docxEl.closest(".bgf-docx-balloon-row") || docxEl : docxEl)
+        : null;
+      if (!anchor && docxCol) {
+        const nodes = docxCol.querySelectorAll("[class*='bgf-para-idx-']");
+        let best = null;
+        let bestDist = 1e9;
+        for (let i = 0; i < nodes.length; i++) {
+          const rr = nodes[i].getBoundingClientRect();
+          if (e.clientY >= rr.top && e.clientY <= rr.bottom) {
+            best = nodes[i];
+            break;
+          }
+          const mid = (rr.top + rr.bottom) / 2;
+          const d = Math.abs(e.clientY - mid);
+          if (d < bestDist) {
+            bestDist = d;
+            best = nodes[i];
+          }
+        }
+        anchor = best;
+      }
+      if (!anchor) return;
+      para = paraIdx(anchor);
+      page = String((parseInt(para, 10) || 0) + 1);
+    } else if (pageWrap) {
+      kind = "pdf";
+      host = pageWrap;
+      page = pageWrap.getAttribute("data-bgf-page") || "1";
+    } else {
+      return;
+    }
+
+    e.preventDefault();
+    e.stopPropagation();
+    const selText = (window.parent.getSelection && window.parent.getSelection().toString() || "").trim().slice(0, 400);
+    const params = {
+      bgf_rc: "1",
+      bgf_rc_kind: kind,
+      bgf_rc_page: page,
+      bgf_rc_para: para,
+      bgf_rc_sel: selText
+    };
+    if (kind === "pdf" && host) {
+      const imgEl = host.querySelector("img");
+      const p = imgEl ? pctOnImg(e, imgEl) : null;
+      if (p) {
+        params.bgf_rc_x = p.x.toFixed(2);
+        params.bgf_rc_y = p.y.toFixed(2);
+      }
+      if (host.dataset && host.dataset.selX0) {
+        params.bgf_rc_x0 = host.dataset.selX0;
+        params.bgf_rc_y0 = host.dataset.selY0;
+        params.bgf_rc_x1 = host.dataset.selX1;
+        params.bgf_rc_y1 = host.dataset.selY1;
+      }
+    }
+    setQuery(params);
+  };
+  doc.addEventListener("contextmenu", doc.__bgfCmtCtxHandler, true);
 })();
 </script>
 """
 
 _MODAL_ONLY_CSS = """
+.bgf-sbs-col {
+  max-height: 72vh !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain;
+}
+.bgf-sbs-grid { align-items: start; }
+.bgf-docx-col.bgf-comment-target .bgf-docx-p,
+.bgf-docx-col.bgf-comment-target .bgf-docx-balloon-row { cursor: context-menu; }
 .bgf-cmt-modal-overlay {
   display: none; position: fixed; inset: 0; background: rgba(13,33,55,.45);
   z-index: 99999; align-items: center; justify-content: center; padding: 16px;
@@ -624,39 +869,26 @@ _MODAL_ONLY_CSS = """
 .bgf-balloon svg, .bgf-balloon path { pointer-events: none; }
 """
 
-_INJECTED_BALLOON_KEY = "_bgf_comment_balloon_js_v4"
-
-_CLOSE_MODAL_JS = """
-<script>
-(function () {
-  const doc = window.parent.document;
-  const overlay = doc.getElementById("bgf-cmt-modal-overlay");
-  if (overlay) overlay.classList.remove("bgf-open");
-})();
-</script>
-"""
+_INJECTED_BALLOON_KEY = "_bgf_comment_balloon_js_v8"
 
 
 def close_comment_modal_overlay() -> None:
-    """Fecha overlay do modal (evita tela esbranquiçada após rerun).
-
-    Só injeta o iframe se o handler de balões já existir — reduz removeChild no React.
-    """
-    if not st.session_state.get(_INJECTED_BALLOON_KEY):
-        return
-    components.html(_CLOSE_MODAL_JS, height=0, scrolling=False)
+    """No-op: o diálogo agora é st.dialog, sem overlay em iframe."""
+    return
 
 
-def ensure_comment_balloon_handler(reviews: list[CommentReview] | None = None) -> None:
-    """Injeta modal + dados dos comentários (a cada render, para o clique funcionar)."""
-    payload = _reviews_payload(reviews or []).replace("</", "<\\/")
-    js = (
-        _BALLOON_JS
-        .replace("__BGF_CSS__", json.dumps(_MODAL_ONLY_CSS))
-        .replace("__BGF_DATA__", payload)
-    )
-    components.html(js, height=0, scrolling=False)
+def ensure_comment_balloon_handler(
+    reviews: list[CommentReview] | None = None,
+    *,
+    sync_enabled: bool = True,
+) -> None:
+    """Clique direito e balões voltam ao Python pelo componente v2 (sem navegar a URL)."""
+    from app.utils.comment_actions_ui import ingest_bridge_event
+    from app.utils.page_bridge import mount_page_bridge
+
+    event = mount_page_bridge(comments=True, sync_enabled=sync_enabled)
     st.session_state[_INJECTED_BALLOON_KEY] = True
+    ingest_bridge_event(event)
 
 
 def _balloon_cache_key(
@@ -671,7 +903,7 @@ def _balloon_cache_key(
         mtime = f"{Path(path_a).stat().st_mtime_ns}:{Path(path_b).stat().st_mtime_ns}"
     except OSError:
         mtime = "0"
-    return f"{path_a}|{path_b}|{mtime}|{ids}|all={int(render_all_pages)}"
+    return f"{path_a}|{path_b}|{mtime}|{ids}|all={int(render_all_pages)}|layout=scroll-v3"
 
 
 def build_side_by_side_balloons_html(
@@ -706,7 +938,8 @@ def build_side_by_side_balloons_html(
         '<span><i class="bgf-cmt-dot" style="background:#16a34a"></i> Atendido</span>'
         '<span><i class="bgf-cmt-dot" style="background:#ca8a04"></i> Atendido parcialmente</span>'
         '<span><i class="bgf-cmt-dot" style="background:#dc2626"></i> Não atendido</span>'
-        '<span style="color:#64748b">· Clique no balão para abrir a análise</span>'
+        '<span style="color:#64748b">· Clique no balão para aceitar/editar · '
+        "Botão direito no documento da <strong>direita</strong> para novo comentário</span>"
         "</div>"
     )
     left = _column_html(
@@ -717,6 +950,7 @@ def build_side_by_side_balloons_html(
         sync_group=sync_group,
         show_markers=True,
         render_all_pages=render_all_pages,
+        is_target=False,
     )
     right = _column_html(
         path_b,
@@ -726,6 +960,7 @@ def build_side_by_side_balloons_html(
         sync_group=sync_group,
         show_markers=True,
         render_all_pages=render_all_pages,
+        is_target=True,
     )
     # Streamlit remove <script> do markdown — dados ficam em div oculta.
     payload = html.escape(_reviews_payload(reviews), quote=False)
@@ -769,10 +1004,10 @@ def render_balloon_include_panel(
     if not pending:
         return
 
-    st.markdown("#### Incluir reforço na versão nova")
+    st.markdown("#### Aceitar reforço na versão nova")
     st.caption(
-        "Clique em um balão colorido para ver a análise completa. "
-        "Use os botões abaixo para gravar o comentário no arquivo revisado."
+        "Clique no balão colorido (ou em **Aceitar**) para ver a análise, "
+        "editar o texto e gravar no arquivo mais recente."
     )
 
     for rev in pending:
@@ -787,19 +1022,13 @@ def render_balloon_include_panel(
             )
         with col_btn:
             if st.button(
-                "Incluir",
+                "Aceitar",
                 key=f"{key_prefix}_inc_{rev.comment_id}",
                 type="primary",
                 use_container_width=True,
             ):
-                try:
-                    with st.spinner("Gravando comentário no arquivo…"):
-                        _apply_reinforcement(rev, new_version)
-                    st.session_state["bgf_show_save_cta"] = new_version.id
-                    close_comment_modal_overlay()
-                    st.rerun()
-                except Exception as exc:
-                    st.error(str(exc))
+                st.session_state["bgf_open_cmt_id"] = rev.comment_id
+                st.rerun()
 
 
 def render_side_by_side_with_comment_balloons(
@@ -815,10 +1044,9 @@ def render_side_by_side_with_comment_balloons(
     new_version=None,
 ) -> None:
     """Renderiza comparação lado a lado com balões de comentário."""
-    ensure_sync_scroll_handler()
     c_sync, c_full = st.columns([3, 2])
     with c_sync:
-        render_sync_scroll_controls(key=f"{sync_group}_sync_scroll")
+        sync_enabled = render_sync_scroll_controls(key=f"{sync_group}_sync_scroll")
     with c_full:
         render_all = st.checkbox(
             "Documento completo (todas as páginas PDF)",
@@ -838,8 +1066,7 @@ def render_side_by_side_with_comment_balloons(
         render_all_pages=render_all,
     )
     st.markdown(html_block, unsafe_allow_html=True)
-    # Depois do HTML: dados + listener de clique (Streamlit remove <script> do markdown).
-    ensure_comment_balloon_handler(reviews)
+    ensure_comment_balloon_handler(reviews, sync_enabled=sync_enabled)
     render_balloon_include_panel(reviews, new_version, key_prefix=f"{sync_group}_inc")
 
 

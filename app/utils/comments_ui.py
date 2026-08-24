@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 import uuid
 from pathlib import Path
 
@@ -105,14 +104,17 @@ def _save_bundle(bundle: DocumentCommentsBundle) -> None:
 
 
 def _ensure_work_file(bundle: DocumentCommentsBundle, source_path: str) -> str:
-    if bundle.annotated_file_path and Path(bundle.annotated_file_path).exists():
-        return bundle.annotated_file_path
-    ext = Path(source_path).suffix
-    dest = Path(source_path).parent / f"{Path(source_path).stem}_revisao{ext}"
-    shutil.copy2(source_path, dest)
-    bundle.annotated_file_path = str(dest)
+    """Usa o próprio arquivo da versão (comentários no arquivo mais recente)."""
+    from app.core.annotation_io import assert_writable, validate_document_path
+
+    src = validate_document_path(source_path)
+    assert_writable(src)
+    current = bundle.annotated_file_path
+    if current and Path(current).resolve() == src and src.exists():
+        return str(src)
+    bundle.annotated_file_path = str(src)
     _save_bundle(bundle)
-    return str(dest)
+    return str(src)
 
 
 def _draft_from_extracted(raw: dict) -> DocumentCommentDraft:
@@ -232,15 +234,20 @@ def apply_quick_comment_to_version(
     anchor_text: str | None = None,
     locations: list | None = None,
     source_ref: str | None = None,
+    percent_point: tuple[float, float] | None = None,
+    percent_rect: tuple[float, float, float, float] | None = None,
+    paragraph_index: int | None = None,
+    page_num: int | None = None,
 ) -> str:
-    """Grava um comentário sugerido diretamente no PDF/DOCX da versão (um clique)."""
+    """Grava um comentário diretamente no PDF/DOCX da versão (arquivo mais recente)."""
     bundle = get_comments_bundle(version.id, version.contract_id)
     work = _ensure_work_file(bundle, version.file_path)
 
     locs = list(locations or [])
-    if not locs and anchor_text:
+    skip_search = percent_point is not None or percent_rect is not None or paragraph_index is not None
+    if not locs and anchor_text and not skip_search:
         locs = find_in_document(work, anchor_text)
-    if not locs and comment_text.strip():
+    if not locs and comment_text.strip() and not skip_search:
         locs = find_in_document(work, comment_text[:120])
 
     work = add_comment_to_document(
@@ -249,6 +256,10 @@ def apply_quick_comment_to_version(
         anchor_text=anchor_text,
         locations=locs,
         output_path=work,
+        percent_point=percent_point,
+        percent_rect=percent_rect,
+        paragraph_index=paragraph_index,
+        page_num=page_num,
     )
     bundle.annotated_file_path = work
     _save_bundle(bundle)
@@ -538,42 +549,22 @@ def render_comment_verification_results(
             if new_version and review_needs_reinforcement(rev):
                 applied_ids = get_quick_applied_ids(new_version.id)
                 if rev.comment_id in applied_ids:
-                    st.success("✅ Sugestão já gravada no PDF novo.")
+                    st.success("✅ Sugestão já gravada no arquivo mais recente.")
                 else:
                     preview = (
                         f"Por favor, atender ao comentário anterior ainda pendente nesta versão:\n\n"
                         f"{rev.original_comment[:500]}"
                     )
-                    with st.expander("Prévia do comentário (texto final gerado ao clicar)", expanded=False):
+                    with st.expander("Prévia do comentário (edite ao aceitar)", expanded=False):
                         st.write(preview)
                     if st.button(
-                        "✅ Comentar no PDF",
+                        "✅ Aceitar (editar e gravar)",
                         type="primary",
                         key=f"{key_prefix}_quick_{rev.comment_id}",
-                        help="Gera a sugestão da IA e grava no arquivo revisado, no trecho correspondente.",
+                        help="Abre o texto sugerido para você editar antes de gravar no arquivo mais recente.",
                     ):
-                        try:
-                            with st.spinner("Gerando sugestão e gravando no PDF..."):
-                                suggestion = suggest_reinforcement(rev)
-                                anchor = rev.referenced_excerpt or rev.change_found
-                                apply_quick_comment_to_version(
-                                    new_version,
-                                    comment_text=suggestion,
-                                    anchor_text=anchor,
-                                    locations=rev.locations,
-                                    source_ref=rev.comment_id,
-                                )
-                            st.success("Comentário gravado no PDF.")
-                            st.session_state["bgf_show_save_cta"] = new_version.id
-                            try:
-                                from app.utils.comment_balloons import close_comment_modal_overlay
-
-                                close_comment_modal_overlay()
-                            except Exception:
-                                pass
-                            st.rerun()
-                        except Exception as exc:
-                            st.error(str(exc))
+                        st.session_state["bgf_open_cmt_id"] = rev.comment_id
+                        st.rerun()
 
             if new_version and rev.locations:
                 render_document_navigator(

@@ -23,9 +23,16 @@ def validate_upload_extension(filename: str) -> str:
     """Retorna extensão em minúsculas ou levanta ValueError."""
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        if ext == ".doc":
+            raise ValueError(
+                "Arquivos .doc (Word 97–2003) não são aceitos. "
+                "Abra o arquivo no Word ou LibreOffice e salve como .docx, "
+                "depois envie novamente. Formatos permitidos: .pdf, .docx."
+            )
         raise ValueError(
             f"Tipo de arquivo não permitido: {ext or '(sem extensão)'}. "
-            f"Use: {', '.join(sorted(ALLOWED_UPLOAD_EXTENSIONS))}"
+            f"Use: {', '.join(sorted(ALLOWED_UPLOAD_EXTENSIONS))}. "
+            "Arquivos .doc não são aceitos — converta para .docx."
         )
     return ext
 

@@ -46,6 +46,8 @@ def init_session_state() -> None:
         "upload_contract_name": "",
         "upload_client_name": "",
         "upload_version_label_default": "Original",
+        "analysis_contract_mode": "new",
+        "analysis_proposal_mode": "none",
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -71,6 +73,16 @@ def _contract_label(c, *, show_client: bool = True) -> str:
     if show_client:
         return f"{c.name} · {c.client_name} ({ver_tag})"
     return f"{c.name} ({ver_tag})"
+
+
+def contract_option_label(c, *, show_client: bool = True) -> str:
+    """Rótulo público do contrato para selects (sidebar e análise inicial)."""
+    return _contract_label(c, show_client=show_client)
+
+
+def filter_contracts_by_search(contracts, search_q: str = ""):
+    """Filtro por texto usado na sidebar (não aplica o primeiro resultado sozinho)."""
+    return _filter_contracts(contracts, search_q=search_q)
 
 
 def _filter_contracts(
@@ -186,6 +198,16 @@ def render_contract_browse_selector(
 def render_contract_selector(key: str = "contract_select") -> str | None:
     """Atalho unificado — mesma experiência de busca em todas as páginas."""
     return render_contract_browse_selector(key, sync_active=True)
+
+
+def render_upload_format_notice() -> None:
+    """Aviso visual: apenas PDF/DOCX; .doc bloqueado com orientação de conversão."""
+    st.info(
+        "**Formatos aceitos:** PDF (`.pdf`) e Word moderno (`.docx`).  \n"
+        "**Não aceito:** `.doc` (Word 97–2003).  \n"
+        "Se o arquivo for `.doc`, abra no Word ou LibreOffice → **Salvar como** → "
+        "**Documento do Word (*.docx)** e envie o `.docx`."
+    )
 
 
 def save_uploaded_file(uploaded_file, contracts_dir) -> str:

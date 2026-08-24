@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>html, body { margin: 0; padding: 0; height: 0; overflow: hidden; }</style>
+</head>
+<body>
+<script>
+(function () {
+  function send(type, data) {
+    window.parent.postMessage(
+      Object.assign({ isStreamlitMessage: true, type: type }, data || {}),
+      "*"
+    );
+  }
+  send("streamlit:componentReady", { apiVersion: 1 });
+  send("streamlit:setFrameHeight", { height: 0 });
+
+  function emit(payload) {
+    payload.ts = Date.now();
+    send("streamlit:setComponentValue", { value: payload, dataType: "json" });
+  }
+
+  function setupParent(args) {
+    const doc = window.parent.document;
+    const css = (args && args.css) || "";
+    try {
+      doc.__bgfCommentsData = JSON.parse((args && args.reviews_json) || "[]");
+    } catch (err) {
+      doc.__bgfCommentsData = [];
+    }
+
+    let style = doc.getElementById("bgf-cmt-modal-styles");
+    if (!style) {
+      style = doc.createElement("style");
+      style.id = "bgf-cmt-modal-styles";
+      doc.head.appendChild(style);
+    }
+    if (css) style.textContent = css;
+
+    if (typeof doc.__bgfSyncScrollEnabled === "undefined") {
+      doc.__bgfSyncScrollEnabled = true;
+    }
+
+    if (doc.__bgfSyncScrollHandler) {
+      try { doc.removeEventListener("wheel", doc.__bgfSyncScrollHandler, true); } catch (err) {}
+    }
+    doc.__bgfSyncScrollHandler = function (e) {
+      if (!doc.__bgfSyncScrollEnabled) return;
+      if (!e.shiftKey) return;
+      const t = e.target && e.target.nodeType === 3 ? e.target.parentElement : e.target;
+      const el = t && t.closest ? t.closest(".bgf-sync-scroll") : null;
+      if (!el) return;
+      const groupCls = Array.from(el.classList).find(function (c) {
+        return c.indexOf("bgf-sg-") === 0;
+      });
+      let peers;
+      if (groupCls) {
+        peers = doc.querySelectorAll(".bgf-sync-scroll." + groupCls);
+      } else {
+        const grid = el.closest(".bgf-sbs-grid, .bgf-diff-wrap, .bgf-diff-side");
+        peers = grid ? grid.querySelectorAll(".bgf-sync-scroll") : [];
+      }
+      if (!peers || peers.length < 2) return;
+      const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+      if (!delta) return;
+      e.preventDefault();
+      e.stopPropagation();
+      peers.forEach(function (p) { p.scrollTop += delta; });
+    };
+    doc.addEventListener("wheel", doc.__bgfSyncScrollHandler, { passive: false, capture: true });
+
+    function pctOnImg(e, img) {
+      const r = img.getBoundingClientRect();
+      if (!r.width || !r.height) return null;
+      const x = ((e.clientX - r.left) / r.width) * 100;
+      const y = ((e.clientY - r.top) / r.height) * 100;
+      return { x: Math.max(0, Math.min(100, x)), y: Math.max(0, Math.min(100, y)) };
+    }
+    function clearSel(wrap) {
+      if (!wrap) return;
+      const old = wrap.querySelector(".bgf-sel-rect");
+      if (old) old.remove();
+      delete wrap.dataset.selX0;
+      delete wrap.dataset.selY0;
+      delete wrap.dataset.selX1;
+      delete wrap.dataset.selY1;
+    }
+    function paraIdx(el) {
+      if (!el) return "";
+      const m = String(el.className || "").match(/bgf-para-idx-(\d+)/);
+      if (m) return m[1];
+      return el.getAttribute("data-bgf-para") || "";
+    }
+
+    if (doc.__bgfCmtClickHandler) {
+      try { doc.removeEventListener("click", doc.__bgfCmtClickHandler, true); } catch (err) {}
+    }
+    if (doc.__bgfCmtCtxHandler) {
+      try { doc.removeEventListener("contextmenu", doc.__bgfCmtCtxHandler, true); } catch (err) {}
+    }
+    if (doc.__bgfCmtDownHandler) {
+      try { doc.removeEventListener("mousedown", doc.__bgfCmtDownHandler, true); } catch (err) {}
+    }
+    if (doc.__bgfCmtMoveHandler) {
+      try { doc.removeEventListener("mousemove", doc.__bgfCmtMoveHandler, true); } catch (err) {}
+    }
+    if (doc.__bgfCmtUpHandler) {
+      try { doc.removeEventListener("mouseup", doc.__bgfCmtUpHandler, true); } catch (err) {}
+    }
+
+    doc.__bgfCmtClickHandler = function (e) {
+      const t = e.target;
+      if (!t || !t.closest) return;
+      const btn = t.closest(".bgf-balloon");
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      emit({ type: "cmt", id: btn.getAttribute("data-cmt-id") || "" });
+    };
+    doc.addEventListener("click", doc.__bgfCmtClickHandler, true);
+
+    let drag = null;
+    doc.__bgfCmtDownHandler = function (e) {
+      if (e.button !== 0) return;
+      const t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest(".bgf-balloon")) return;
+      const wrap = t.closest(".bgf-page-wrap.bgf-comment-target");
+      if (!wrap) return;
+      const img = wrap.querySelector("img");
+      if (!img) return;
+      const p = pctOnImg(e, img);
+      if (!p) return;
+      drag = { wrap: wrap, start: p };
+      clearSel(wrap);
+      e.preventDefault();
+    };
+    doc.__bgfCmtMoveHandler = function (e) {
+      if (!drag) return;
+      const img = drag.wrap.querySelector("img");
+      const p = pctOnImg(e, img);
+      if (!p) return;
+      let box = drag.wrap.querySelector(".bgf-sel-rect");
+      if (!box) {
+        box = doc.createElement("div");
+        box.className = "bgf-sel-rect";
+        drag.wrap.appendChild(box);
+      }
+      const x0 = Math.min(drag.start.x, p.x);
+      const y0 = Math.min(drag.start.y, p.y);
+      const x1 = Math.max(drag.start.x, p.x);
+      const y1 = Math.max(drag.start.y, p.y);
+      box.style.left = x0 + "%";
+      box.style.top = y0 + "%";
+      box.style.width = (x1 - x0) + "%";
+      box.style.height = (y1 - y0) + "%";
+    };
+    doc.__bgfCmtUpHandler = function (e) {
+      if (!drag) return;
+      const img = drag.wrap.querySelector("img");
+      const p = pctOnImg(e, img) || drag.start;
+      const x0 = Math.min(drag.start.x, p.x);
+      const y0 = Math.min(drag.start.y, p.y);
+      const x1 = Math.max(drag.start.x, p.x);
+      const y1 = Math.max(drag.start.y, p.y);
+      if ((x1 - x0) > 1.2 && (y1 - y0) > 1.0) {
+        drag.wrap.dataset.selX0 = x0.toFixed(2);
+        drag.wrap.dataset.selY0 = y0.toFixed(2);
+        drag.wrap.dataset.selX1 = x1.toFixed(2);
+        drag.wrap.dataset.selY1 = y1.toFixed(2);
+      } else {
+        clearSel(drag.wrap);
+      }
+      drag = null;
+    };
+    doc.addEventListener("mousedown", doc.__bgfCmtDownHandler, true);
+    doc.addEventListener("mousemove", doc.__bgfCmtMoveHandler, true);
+    doc.addEventListener("mouseup", doc.__bgfCmtUpHandler, true);
+
+    doc.__bgfCmtCtxHandler = function (e) {
+      let t = e.target;
+      if (t && t.nodeType === 3) t = t.parentElement;
+      if (!t || !t.closest) return;
+
+      const docxEl = t.closest(".bgf-docx-p, .bgf-docx-balloon-row, .bgf-docx-text");
+      const pageWrap = t.closest(".bgf-page-wrap.bgf-comment-target");
+      const docxCol = t.closest(".bgf-docx-col.bgf-comment-target");
+      let kind = "";
+      let page = "1";
+      let para = "";
+      let host = null;
+
+      if (docxEl || docxCol) {
+        kind = "docx";
+        let anchor = docxEl
+          ? (docxEl.classList.contains("bgf-docx-text")
+            ? docxEl.closest(".bgf-docx-balloon-row") || docxEl
+            : docxEl)
+          : null;
+        if (!anchor && docxCol) {
+          const nodes = docxCol.querySelectorAll("[class*='bgf-para-idx-']");
+          let best = null;
+          let bestDist = 1e9;
+          for (let i = 0; i < nodes.length; i++) {
+            const rr = nodes[i].getBoundingClientRect();
+            if (e.clientY >= rr.top && e.clientY <= rr.bottom) {
+              best = nodes[i];
+              break;
+            }
+            const mid = (rr.top + rr.bottom) / 2;
+            const d = Math.abs(e.clientY - mid);
+            if (d < bestDist) {
+              bestDist = d;
+              best = nodes[i];
+            }
+          }
+          anchor = best;
+        }
+        if (!anchor) return;
+        para = paraIdx(anchor);
+        page = String((parseInt(para, 10) || 0) + 1);
+      } else if (pageWrap) {
+        kind = "pdf";
+        host = pageWrap;
+        page = pageWrap.getAttribute("data-bgf-page") || "1";
+      } else {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      const selText = (
+        window.parent.getSelection && window.parent.getSelection().toString() || ""
+      ).trim().slice(0, 400);
+      const payload = {
+        type: "rc",
+        kind: kind,
+        page: page,
+        para: para,
+        sel: selText
+      };
+      if (kind === "pdf" && host) {
+        const imgEl = host.querySelector("img");
+        const p = imgEl ? pctOnImg(e, imgEl) : null;
+        if (p) {
+          payload.x = p.x.toFixed(2);
+          payload.y = p.y.toFixed(2);
+        }
+        if (host.dataset && host.dataset.selX0) {
+          payload.x0 = host.dataset.selX0;
+          payload.y0 = host.dataset.selY0;
+          payload.x1 = host.dataset.selX1;
+          payload.y1 = host.dataset.selY1;
+        }
+      }
+      emit(payload);
+    };
+    doc.addEventListener("contextmenu", doc.__bgfCmtCtxHandler, true);
+  }
+
+  window.addEventListener("message", function (event) {
+    const msg = event.data;
+    if (!msg || msg.type !== "streamlit:render") return;
+    setupParent(msg.args || {});
+  });
+})();
+</script>
+</body>
+</html>

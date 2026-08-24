@@ -3,70 +3,30 @@
 from __future__ import annotations
 
 import streamlit as st
-import streamlit.components.v1 as components
-
-# No Windows, Shift+roda costuma virar deltaX (scroll horizontal).
-_SYNC_SCROLL_JS = """
-<script>
-(function () {
-  const doc = window.parent.document;
-  if (doc.__bgfSyncScrollHandler) {
-    try {
-      doc.removeEventListener("wheel", doc.__bgfSyncScrollHandler, true);
-    } catch (err) {}
-  }
-  if (typeof doc.__bgfSyncScrollEnabled === "undefined") {
-    doc.__bgfSyncScrollEnabled = true;
-  }
-
-  function handler(e) {
-    if (!doc.__bgfSyncScrollEnabled) return;
-    if (!e.shiftKey) return;
-    const el = e.target && e.target.closest
-      ? e.target.closest(".bgf-sync-scroll")
-      : null;
-    if (!el) return;
-    const group = el.getAttribute("data-sync-group");
-    if (!group) return;
-    const peers = doc.querySelectorAll(
-      '.bgf-sync-scroll[data-sync-group="' + group + '"]'
-    );
-    if (peers.length < 2) return;
-
-    const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-    if (!delta) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    peers.forEach(function (p) {
-      p.scrollTop += delta;
-    });
-  }
-
-  doc.__bgfSyncScrollHandler = handler;
-  doc.addEventListener("wheel", handler, { passive: false, capture: true });
-})();
-</script>
-"""
-
-_ENABLE_JS = """
-<script>
-(function () {
-  window.parent.document.__bgfSyncScrollEnabled = %s;
-})();
-</script>
-"""
 
 
-_SYNC_SCROLL_INJECTED_KEY = "_bgf_sync_scroll_handler_injected"
+def sync_group_class(group: str) -> str:
+    """Classe CSS estável para agrupar painéis (o Streamlit remove data-*)."""
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in (group or "default"))
+    return f"bgf-sg-{safe}"
+
+
+def sync_scroll_classes(group: str) -> str:
+    return f"bgf-sync-scroll {sync_group_class(group)}"
+
+
+def _current_sync_enabled() -> bool:
+    for key, value in st.session_state.items():
+        if str(key).endswith("_sync_scroll") and isinstance(value, bool):
+            return value
+    return True
 
 
 def ensure_sync_scroll_handler() -> None:
-    """Registra listener de Shift+roda uma vez por sessão (evita removeChild no React)."""
-    if st.session_state.get(_SYNC_SCROLL_INJECTED_KEY):
-        return
-    components.html(_SYNC_SCROLL_JS, height=0, scrolling=False)
-    st.session_state[_SYNC_SCROLL_INJECTED_KEY] = True
+    """Registra Shift+roda no DOM da página (componente Streamlit v2)."""
+    from app.utils.page_bridge import mount_page_bridge
+
+    mount_page_bridge(comments=False, sync_enabled=_current_sync_enabled())
 
 
 def render_sync_scroll_controls(*, key: str = "bgf_sync_scroll") -> bool:
@@ -77,11 +37,6 @@ def render_sync_scroll_controls(*, key: str = "bgf_sync_scroll") -> bool:
         key=key,
         help="Com a opção ligada, segure Shift e role a roda do mouse sobre um documento "
         "para descer/subir os dois painéis juntos.",
-    )
-    components.html(
-        _ENABLE_JS % ("true" if enabled else "false"),
-        height=0,
-        scrolling=False,
     )
     if enabled:
         st.caption(

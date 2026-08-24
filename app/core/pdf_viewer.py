@@ -194,49 +194,167 @@ def build_highlighted_pdf(
     return str(dest)
 
 
+def page_point_from_percent(page, x_pct: float, y_pct: float) -> fitz.Point:
+    """Converte clique em % da imagem da página para ponto PDF."""
+    x = max(0.0, min(100.0, float(x_pct))) / 100.0 * page.rect.width
+    y = max(0.0, min(100.0, float(y_pct))) / 100.0 * page.rect.height
+    return fitz.Point(x, y)
+
+
+def rect_from_percent(
+    page,
+    x0_pct: float,
+    y0_pct: float,
+    x1_pct: float,
+    y1_pct: float,
+) -> fitz.Rect:
+    x0, x1 = sorted((float(x0_pct), float(x1_pct)))
+    y0, y1 = sorted((float(y0_pct), float(y1_pct)))
+    r = page.rect
+    return fitz.Rect(
+        max(0.0, x0 / 100.0 * r.width),
+        max(0.0, y0 / 100.0 * r.height),
+        min(r.width, x1 / 100.0 * r.width),
+        min(r.height, y1 / 100.0 * r.height),
+    )
+
+
+def text_near_pdf_point(
+    pdf_path: str,
+    page_num: int,
+    x_pct: float,
+    y_pct: float,
+    radius: float = 36.0,
+) -> str:
+    """Trecho próximo ao clique (âncora sugerida no diálogo)."""
+    path = Path(pdf_path)
+    if not path.is_file() or path.suffix.lower() != ".pdf":
+        return ""
+    doc = fitz.open(str(path))
+    try:
+        if page_num < 1 or page_num > len(doc):
+            return ""
+        page = doc[page_num - 1]
+        pt = page_point_from_percent(page, x_pct, y_pct)
+        clip = fitz.Rect(
+            max(0, pt.x - radius),
+            max(0, pt.y - radius),
+            min(page.rect.width, pt.x + radius * 3),
+            min(page.rect.height, pt.y + radius),
+        )
+        return (page.get_text("text", clip=clip) or "").strip()[:500]
+    finally:
+        doc.close()
+
+
+def _pdf_search_rects(page, anchor_text: str | None) -> list[fitz.Rect]:
+    if not anchor_text:
+        return []
+    query = _clean_query(anchor_text, 80)
+    if len(query) < 4:
+        return []
+    found = page.search_for(query)
+    return list(found[:8]) if found else []
+
+
+def _save_pdf_document(doc, dest: Path, *, incremental: bool) -> bool:
+    """Grava o PDF. Retorna True se o documento já foi fechado."""
+    from app.core.annotation_io import atomic_replace, make_sibling_temp
+
+    if incremental:
+        try:
+            doc.saveIncr()
+            return False
+        except Exception as exc:
+            logger.warning("saveIncr falhou em {}: {}", dest.name, exc)
+    tmp = make_sibling_temp(dest)
+    try:
+        doc.save(str(tmp), garbage=4, deflate=True)
+        doc.close()
+        atomic_replace(tmp, dest)
+        return True
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 def add_comment_to_pdf(
     pdf_path: str,
     page_num: int,
     comment_text: str,
     anchor_text: str | None = None,
     output_path: str | None = None,
+    rects: list[PdfRect] | None = None,
+    point: tuple[float, float] | None = None,
+    percent_point: tuple[float, float] | None = None,
+    percent_rect: tuple[float, float, float, float] | None = None,
 ) -> str:
-    """Insere comentário (anotação Text) no PDF."""
-    src = Path(pdf_path)
-    if output_path:
-        dest = Path(output_path)
-    else:
-        dest = src.parent / f"{src.stem}_com_comentarios.pdf"
+    """Insere comentário nativo no PDF (Highlight no trecho ou nota no ponto)."""
+    from app.core.annotation_io import (
+        AnnotationError,
+        assert_writable,
+        validate_comment_text,
+        validate_document_path,
+    )
 
-    # Copiar para não sobrescrever original
-    if dest.resolve() != src.resolve():
+    comment_text = validate_comment_text(comment_text)
+    src = validate_document_path(pdf_path)
+    dest = Path(output_path).resolve() if output_path else src
+    if dest.suffix.lower() != ".pdf":
+        dest = dest.with_suffix(".pdf")
+
+    if dest != src:
         import shutil
 
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
-        work_path = str(dest)
-    else:
-        work_path = str(src)
+    assert_writable(dest)
 
+    work_path = str(dest)
     doc = fitz.open(work_path)
+    closed = False
     try:
+        if page_num < 1 or page_num > len(doc):
+            raise AnnotationError(
+                f"Página {page_num} inválida — o PDF tem {len(doc)} página(s)."
+            )
         page = doc[page_num - 1]
-        point = fitz.Point(72, 72)
-        if anchor_text:
-            rects = page.search_for(_clean_query(anchor_text, 80))
-            if rects:
-                point = rects[0].top_left
+        target_rects: list[fitz.Rect] = []
+        if percent_rect:
+            sel = rect_from_percent(page, *percent_rect)
+            if sel.width >= 4 and sel.height >= 4:
+                target_rects.append(sel)
+        if rects:
+            target_rects.extend(_model_to_rect(r) for r in rects)
+        if not target_rects:
+            target_rects.extend(_pdf_search_rects(page, anchor_text))
 
-        annot = page.add_text_annot(point, comment_text)
-        annot.set_info(content=comment_text, title="BGF Revisão")
-        annot.set_colors(stroke=COLOR_COMMENT)
-        annot.update()
-        # PyMuPDF exige salvamento incremental ao gravar no mesmo arquivo aberto
-        if Path(work_path).resolve() == Path(dest).resolve():
-            doc.saveIncr()
+        if target_rects:
+            annot = page.add_highlight_annot(target_rects[0])
+            annot.set_info(content=comment_text, title="BGF Revisão")
+            annot.set_colors(stroke=COLOR_COMMENT)
+            annot.update()
         else:
-            doc.save(str(dest), garbage=4, deflate=True)
+            if percent_point:
+                pt = page_point_from_percent(page, percent_point[0], percent_point[1])
+            elif point:
+                pt = fitz.Point(float(point[0]), float(point[1]))
+            else:
+                raise AnnotationError(
+                    "Não foi possível localizar o trecho no PDF. "
+                    "Clique com o botão direito no ponto desejado no documento da direita."
+                )
+            annot = page.add_text_annot(pt, comment_text)
+            annot.set_info(content=comment_text, title="BGF Revisão")
+            annot.set_colors(stroke=COLOR_COMMENT)
+            annot.update()
+
+        incremental = Path(work_path).resolve() == dest.resolve()
+        closed = _save_pdf_document(doc, dest, incremental=incremental)
     finally:
-        doc.close()
+        if not closed:
+            doc.close()
 
     logger.info("Comentário adicionado na página {} → {}", page_num, dest.name)
     return str(dest)

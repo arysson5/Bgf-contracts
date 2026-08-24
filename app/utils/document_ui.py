@@ -13,6 +13,7 @@ from app.utils.pdf_ui import page_count_cached, render_page_image_cached, show_p
 from app.utils.sync_scroll import (
     ensure_sync_scroll_handler,
     render_sync_scroll_controls,
+    sync_scroll_classes,
 )
 
 _FULL_DOC_CSS = """
@@ -102,7 +103,7 @@ def _show_pdf_sync_scroll(
             b64 = base64.b64encode(f.read()).decode()
         inner_h = max(400, height - 24)
         st.markdown(
-            f'<div class="bgf-sync-scroll" data-sync-group="{sync_group}" '
+            f'<div class="{sync_scroll_classes(sync_group)}" '
             f'style="max-height:{height}px;overflow-y:auto;border:1px solid #D6E2F0;'
             f'border-radius:8px;padding:4px;background:#fff;">'
             f'<iframe src="data:application/pdf;base64,{b64}" width="100%" '
@@ -129,10 +130,9 @@ def render_side_by_side_documents(
     key_prefix: str = "sbs",
 ) -> None:
     """Layout unificado: dois documentos lado a lado ou diff textual HTML."""
-    ensure_sync_scroll_handler()
     sync_group = key_prefix
 
-    if comment_reviews:
+    if comment_reviews is not None:
         from app.utils.comment_balloons import (
             close_comment_modal_overlay,
             render_side_by_side_with_comment_balloons,
@@ -155,6 +155,7 @@ def render_side_by_side_documents(
     if text_diff_html:
         render_sync_scroll_controls(key=f"{key_prefix}_sync_scroll")
         st.markdown(text_diff_html, unsafe_allow_html=True)
+        ensure_sync_scroll_handler()
         return
 
     full_key_a = f"{key_prefix}_full_a"
@@ -189,6 +190,7 @@ def render_side_by_side_documents(
             full_doc_key=full_key_b,
             sync_group=sync_group,
         )
+    ensure_sync_scroll_handler()
 
 
 def _render_document_column(
@@ -256,7 +258,7 @@ def _render_document_column(
         height = _doc_full_height(full_doc_key)
         html = docx_html_cached(file_path, highlight, color)
         st.markdown(
-            f'<div class="bgf-sync-scroll" data-sync-group="{sync_group}" '
+            f'<div class="{sync_scroll_classes(sync_group)}" '
             f'style="max-height:{height}px;overflow-y:auto;border:1px solid #D6E2F0;'
             f'border-radius:8px;padding:8px;">{html}</div>',
             unsafe_allow_html=True,

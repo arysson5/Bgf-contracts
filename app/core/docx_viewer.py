@@ -2,24 +2,33 @@
 
 import html
 import re
-import uuid
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from docx import Document
-from docx.enum.text import WD_COLOR_INDEX
-from docx.shared import Pt
 from loguru import logger
 from rapidfuzz import fuzz
 
 from app.models.schemas import TextLocation
 
 _W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+_COMMENT_REL_TYPE = (
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments"
+)
+_COMMENT_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+)
+_COMMENT_AUTHOR = "BGF Revisão"
+_COMMENT_INITIALS = "BGF"
 
 
 def find_text_in_docx(file_path: str, query: str, max_results: int = 5) -> list[TextLocation]:
-    """Localiza trecho nos parágrafos do DOCX."""
+    """Localiza trecho nos parágrafos do DOCX (mesmo índice do XML, inclui tabelas)."""
     query = re.sub(r"\s+", " ", (query or "").strip())
     if len(query) < 4:
         return []
@@ -28,11 +37,9 @@ def find_text_in_docx(file_path: str, query: str, max_results: int = 5) -> list[
     if not path.exists() or path.suffix.lower() not in (".docx", ".doc"):
         return []
 
-    doc = Document(file_path)
     locations: list[TextLocation] = []
-
-    for idx, para in enumerate(doc.paragraphs):
-        text = para.text.strip()
+    for idx, text in enumerate(iter_docx_paragraph_texts(file_path)):
+        text = (text or "").strip()
         if not text:
             continue
         score = 100 if query in text else fuzz.partial_ratio(query, text)
@@ -84,28 +91,13 @@ def add_comment_to_docx(
     comment_text: str,
     output_path: str | None = None,
 ) -> str:
-    """Insere nota de revisão após o parágrafo referenciado."""
-    import shutil
-
-    src = Path(file_path)
-    dest = Path(output_path) if output_path else src.parent / f"{src.stem}_comentarios.docx"
-    if dest.resolve() != src.resolve():
-        shutil.copy2(src, dest)
-
-    doc = Document(str(dest))
-    idx = min(max(0, paragraph_index), len(doc.paragraphs) - 1)
-    if idx + 1 < len(doc.paragraphs):
-        new_para = doc.paragraphs[idx + 1].insert_paragraph_before("")
-    else:
-        new_para = doc.add_paragraph()
-    run = new_para.add_run(f"[Contract Analyzer] {comment_text}")
-    run.bold = True
-    run.font.size = Pt(10)
-    run.font.highlight_color = WD_COLOR_INDEX.YELLOW
-
-    doc.save(str(dest))
-    logger.info("Comentário DOCX inserido após parágrafo {}", idx)
-    return str(dest)
+    """Insere comentário nativo do Word (balão) no parágrafo indicado."""
+    return _add_native_word_comment(
+        file_path,
+        paragraph_index,
+        comment_text,
+        output_path=output_path,
+    )
 
 
 def _para_plain_text(p_el: ET.Element) -> str:
@@ -350,3 +342,167 @@ def extract_comments_from_docx(file_path: str) -> list[dict]:
     except Exception as exc:
         logger.debug("Comentários DOCX não disponíveis: {}", exc)
     return comments
+
+
+def _xml_register_word_ns() -> None:
+    ET.register_namespace("w", _W)
+
+
+def _serialize_word_xml(root: ET.Element) -> bytes:
+    _xml_register_word_ns()
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _ensure_comments_part(files: dict[str, bytes]) -> tuple[ET.Element, int]:
+    """Garante comments.xml + content types + relacionamento. Retorna (root, próximo id)."""
+    _xml_register_word_ns()
+    if "word/comments.xml" in files and files["word/comments.xml"].strip():
+        root = ET.fromstring(files["word/comments.xml"])
+    else:
+        root = ET.fromstring(
+            b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            b'<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'
+        )
+
+    max_id = -1
+    for cmt in root.findall(f"{_W_NS}comment"):
+        try:
+            max_id = max(max_id, int(cmt.get(f"{_W_NS}id") or "0"))
+        except ValueError:
+            continue
+
+    ct_xml = files["[Content_Types].xml"].decode("utf-8")
+    if "/word/comments.xml" not in ct_xml:
+        files["[Content_Types].xml"] = ct_xml.replace(
+            "</Types>",
+            '<Override PartName="/word/comments.xml" '
+            f'ContentType="{_COMMENT_CONTENT_TYPE}"/></Types>',
+            1,
+        ).encode("utf-8")
+
+    rels_path = "word/_rels/document.xml.rels"
+    rels_xml = files[rels_path].decode("utf-8")
+    if _COMMENT_REL_TYPE not in rels_xml:
+        rid = _next_rel_id_from_xml(rels_xml)
+        files[rels_path] = rels_xml.replace(
+            "</Relationships>",
+            f'<Relationship Id="{rid}" Type="{_COMMENT_REL_TYPE}" Target="comments.xml"/>'
+            "</Relationships>",
+            1,
+        ).encode("utf-8")
+
+    return root, max_id + 1
+
+
+def _next_rel_id_from_xml(rels_xml: str) -> str:
+    used = {int(n) for n in re.findall(r'Id="rId(\d+)"', rels_xml)}
+    n = 1
+    while n in used:
+        n += 1
+    return f"rId{n}"
+
+
+def _append_comment_xml(root: ET.Element, comment_id: int, comment_text: str) -> None:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cmt = ET.SubElement(
+        root,
+        f"{_W_NS}comment",
+        {
+            f"{_W_NS}id": str(comment_id),
+            f"{_W_NS}author": _COMMENT_AUTHOR,
+            f"{_W_NS}date": now,
+            f"{_W_NS}initials": _COMMENT_INITIALS,
+        },
+    )
+    p_el = ET.SubElement(cmt, f"{_W_NS}p")
+    run = ET.SubElement(p_el, f"{_W_NS}r")
+    t_el = ET.SubElement(run, f"{_W_NS}t")
+    t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t_el.text = comment_text
+
+
+def _anchor_paragraph(para: ET.Element, comment_id: int) -> None:
+    """Envolve o parágrafo com commentRangeStart/End + commentReference."""
+    start = ET.Element(f"{_W_NS}commentRangeStart", {f"{_W_NS}id": str(comment_id)})
+    end = ET.Element(f"{_W_NS}commentRangeEnd", {f"{_W_NS}id": str(comment_id)})
+    ref_run = ET.Element(f"{_W_NS}r")
+    ET.SubElement(ref_run, f"{_W_NS}commentReference", {f"{_W_NS}id": str(comment_id)})
+
+    children = list(para)
+    insert_at = 0
+    if children and children[0].tag == f"{_W_NS}pPr":
+        insert_at = 1
+    para.insert(insert_at, start)
+    para.append(end)
+    para.append(ref_run)
+
+
+def _add_native_word_comment(
+    file_path: str,
+    paragraph_index: int,
+    comment_text: str,
+    output_path: str | None = None,
+) -> str:
+    from app.core.annotation_io import (
+        AnnotationError,
+        assert_writable,
+        atomic_replace,
+        make_sibling_temp,
+        validate_comment_text,
+        validate_document_path,
+    )
+
+    comment_text = validate_comment_text(comment_text)
+    src = validate_document_path(file_path)
+    dest = Path(output_path).resolve() if output_path else src
+    if dest.suffix.lower() not in (".docx", ".doc"):
+        dest = dest.with_suffix(".docx")
+    if dest != src:
+        import shutil
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+    assert_writable(dest)
+
+    with ZipFile(dest, "r") as zf:
+        files = {name: zf.read(name) for name in zf.namelist()}
+
+    if "word/document.xml" not in files:
+        raise AnnotationError("DOCX inválido: falta word/document.xml.")
+
+    comments_root, new_id = _ensure_comments_part(files)
+    doc_root = ET.fromstring(files["word/document.xml"])
+    body = doc_root.find(f"{_W_NS}body")
+    if body is None:
+        body = doc_root.find(f".//{_W_NS}body")
+    if body is None:
+        raise AnnotationError("DOCX inválido: documento sem corpo.")
+
+    paragraphs = list(_iter_body_paragraphs(body))
+    if not paragraphs:
+        raise AnnotationError("Não há parágrafos no DOCX para ancorar o comentário.")
+    idx = int(paragraph_index)
+    if idx < 0 or idx >= len(paragraphs):
+        raise AnnotationError(
+            f"Parágrafo {idx + 1} inválido — o documento tem {len(paragraphs)} parágrafo(s)."
+        )
+
+    _append_comment_xml(comments_root, new_id, comment_text)
+    _anchor_paragraph(paragraphs[idx], new_id)
+
+    files["word/comments.xml"] = _serialize_word_xml(comments_root)
+    files["word/document.xml"] = _serialize_word_xml(doc_root)
+
+    tmp = make_sibling_temp(dest)
+    try:
+        with ZipFile(tmp, "w", compression=ZIP_DEFLATED) as zf:
+            for name, data in files.items():
+                zf.writestr(name, data)
+        atomic_replace(tmp, dest)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+    logger.info("Comentário nativo DOCX inserido no parágrafo {} → {}", idx, dest.name)
+    return str(dest)

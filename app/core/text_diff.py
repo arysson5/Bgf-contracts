@@ -512,10 +512,10 @@ def render_side_by_side_html(
     right_body = "<br><br>".join(right_parts) or "<em>(vazio)</em>"
     return (
         f"{_DIFF_CSS}{_diff_legend_html()}"
-        f'<div class="bgf-diff-wrap bgf-diff-side" data-sync-group="{html.escape(sync_group)}">'
-        f'<div class="bgf-diff-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
+        f'<div class="bgf-diff-wrap bgf-diff-side bgf-sg-{html.escape(sync_group)}">'
+        f'<div class="bgf-diff-col bgf-sync-scroll bgf-sg-{html.escape(sync_group)}">'
         f"<h4>{html.escape(label_a)}</h4>{left_body}</div>"
-        f'<div class="bgf-diff-col bgf-sync-scroll" data-sync-group="{html.escape(sync_group)}">'
+        f'<div class="bgf-diff-col bgf-sync-scroll bgf-sg-{html.escape(sync_group)}">'
         f"<h4>{html.escape(label_b)}</h4>{right_body}</div>"
         f"</div>"
     )

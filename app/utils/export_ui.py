@@ -54,7 +54,52 @@ def get_annotated_work_path(version) -> str | None:
     work = bundle.annotated_file_path
     if work and Path(work).exists():
         return work
+    path = getattr(version, "file_path", None)
+    if path and Path(path).exists() and st.session_state.get("bgf_show_save_cta") == getattr(
+        version, "id", None
+    ):
+        return path
     return None
+
+
+def _read_save_bytes(work: str) -> bytes:
+    try:
+        return Path(work).read_bytes()
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"Não foi possível ler «{Path(work).name}». "
+            "O arquivo pode estar aberto em outro programa."
+        ) from exc
+
+
+def render_browser_save_button(
+    version,
+    *,
+    key_prefix: str = "dl",
+    label: str | None = None,
+) -> bool:
+    """Botão Salvar como do navegador, com extensão travada no arquivo de origem."""
+    work = get_annotated_work_path(version) or getattr(version, "file_path", None)
+    if not work or not Path(work).exists():
+        return False
+    suggested = _enforce_source_suffix(_suggest_export_name(work, version), work)
+    ext = Path(work).suffix.upper().lstrip(".") or "arquivo"
+    try:
+        data = _read_save_bytes(work)
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        return False
+    st.download_button(
+        label or f"💾 Salvar {ext} no computador",
+        data,
+        file_name=suggested,
+        mime=_mime_for(work),
+        key=f"{key_prefix}_browser_save",
+        type="primary",
+        use_container_width=True,
+        help="Abre a janela Salvar como do navegador. A extensão do arquivo é mantida.",
+    )
+    return True
 
 
 def export_file_to_path(source: str | Path, dest: str | Path) -> Path:
@@ -116,24 +161,33 @@ def render_annotated_export_panel(
     raw_name = st.text_input(
         "Nome do arquivo",
         key=fname_key,
-        help=f"Extensão fixa: {Path(work).suffix}",
+        help=f"A extensão {Path(work).suffix} é fixa e não pode ser alterada.",
         label_visibility="visible",
     )
     file_name = _enforce_source_suffix(raw_name or suggested, work)
+    if raw_name and Path(raw_name).suffix and Path(raw_name).suffix.lower() != Path(work).suffix.lower():
+        st.warning(
+            f"A extensão foi corrigida para **{Path(work).suffix}** "
+            "para o arquivo abrir corretamente em outro computador."
+        )
 
-    data = Path(work).read_bytes()
+    try:
+        data = _read_save_bytes(work)
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        return False
     mime = _mime_for(work)
     dl_label = "💾 Salvar PDF" if Path(work).suffix.lower() == ".pdf" else "💾 Salvar DOCX"
 
     st.download_button(
-        f"{dl_label} (download)",
+        f"{dl_label} (escolher pasta)",
         data,
         file_name=file_name,
         mime=mime,
         key=f"{key_prefix}_dl_saveas",
         type="primary",
         use_container_width=True,
-        help="Abre a janela Salvar como do navegador.",
+        help="Abre a janela Salvar como do navegador. Escolha a pasta de destino.",
     )
 
     last = st.session_state.get(f"{key_prefix}_last_export")
@@ -184,7 +238,11 @@ def render_prominent_save_cta(
     ext = Path(work).suffix.upper().lstrip(".") or "arquivo"
     suggested = _suggest_export_name(work, version)
     file_name = _enforce_source_suffix(suggested, work)
-    data = Path(work).read_bytes()
+    try:
+        data = _read_save_bytes(work)
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        return False
     mime = _mime_for(work)
 
     st.success(
@@ -199,7 +257,7 @@ def render_prominent_save_cta(
         key=f"{key_prefix}_prominent_dl",
         type="primary",
         use_container_width=True,
-        help="Abre a janela «Salvar como» do navegador.",
+        help="Abre a janela «Salvar como» do navegador. A extensão original é mantida.",
     )
-    st.caption(f"Arquivo de trabalho: `{Path(work).name}`")
+    st.caption(f"Arquivo: `{Path(work).name}` — escolha a pasta na janela do navegador.")
     return True

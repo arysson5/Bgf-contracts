@@ -6,7 +6,6 @@ from pathlib import Path
 
 import streamlit as st
 
-from app.db import database as db  # noqa: F401 — usado na sidebar
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _APP_ICON_ICO = _PROJECT_ROOT / "aplicativo.ico"
@@ -31,9 +30,9 @@ def get_app_icon() -> str:
     if _APP_FAVICON_PNG.is_file():
         return str(_APP_FAVICON_PNG)
     return "📄"
-from app.utils.data_cache import cached_contracts_for_session
+from app.db import database as db
 from app.utils.datetime_br import format_brazil_datetime
-from app.utils.active_contract import ensure_active_contract_applied, on_sidebar_contract_changed
+from app.utils.active_contract import ensure_active_contract_applied, render_sidebar_contract_controls
 from app.utils.auth import is_admin, render_logout_button, require_login
 from app.utils.ui import init_session_state
 
@@ -370,6 +369,125 @@ footer.ca-footer {{
     border-top: 1px solid {COLORS["border"]};
 }}
 
+.ca-sidebar-context {{
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(245, 184, 0, 0.45);
+    border-left: 4px solid {COLORS["gold"]};
+    border-radius: 10px;
+    padding: 0.75rem 0.85rem;
+    margin: 0.65rem 0 0.85rem 0;
+}}
+.ca-sidebar-context .kicker {{
+    font-size: 0.65rem !important;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: {COLORS["gold"]} !important;
+    margin-bottom: 0.35rem;
+}}
+.ca-sidebar-context .title {{
+    font-size: 0.95rem !important;
+    font-weight: 700;
+    color: {COLORS["white"]} !important;
+    line-height: 1.3;
+}}
+.ca-sidebar-context .meta {{
+    font-size: 0.8rem !important;
+    color: #B8C9DC !important;
+    margin-bottom: 0.55rem;
+}}
+.ca-sidebar-context .row {{
+    font-size: 0.78rem !important;
+    color: #E8EEF5 !important;
+    margin-top: 0.2rem;
+    line-height: 1.35;
+}}
+.ca-sidebar-context .row span {{
+    display: inline-block;
+    min-width: 4.4rem;
+    color: {COLORS["gold"]} !important;
+    font-weight: 600;
+}}
+
+.ca-source-card {{
+    background: {COLORS["white"]};
+    border: 1px solid {COLORS["border"]};
+    border-radius: 12px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 1.1rem;
+    box-shadow: 0 1px 4px rgba(10, 61, 122, 0.06);
+}}
+.ca-source-card.is-saved,
+.ca-source-card.is-salva {{
+    border-left: 4px solid {COLORS["gold"]};
+}}
+.ca-source-card.is-new,
+.ca-source-card.is-novo {{
+    border-left: 4px solid {COLORS["blue"]};
+}}
+.ca-source-head {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.45rem 0.7rem;
+    margin-bottom: 0.75rem;
+}}
+.ca-source-head strong {{
+    color: {COLORS["navy"]};
+    font-size: 1.05rem;
+}}
+.ca-source-client {{
+    color: {COLORS["text_muted"]};
+    font-size: 0.9rem;
+}}
+.ca-source-card p {{
+    margin: 0.35rem 0 0 0;
+    color: {COLORS["text_muted"]};
+    font-size: 0.9rem;
+    line-height: 1.45;
+}}
+.ca-source-row {{
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.45rem 0;
+    border-top: 1px solid {COLORS["border"]};
+}}
+.ca-source-row strong {{
+    color: {COLORS["text"]};
+    display: block;
+}}
+.ca-source-file {{
+    display: block;
+    color: {COLORS["text_muted"]};
+    font-size: 0.8rem;
+    margin-top: 0.1rem;
+}}
+.ca-pill {{
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    padding: 0.18rem 0.55rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-top: 0.15rem;
+}}
+.ca-pill-saved, .ca-pill-salvo, .ca-pill-salva {{
+    background: {COLORS["gold_light"]};
+    color: {COLORS["navy"]};
+}}
+.ca-pill-new, .ca-pill-novo, .ca-pill-nova {{
+    background: {COLORS["blue_light"]};
+    color: {COLORS["blue"]};
+}}
+.ca-pill-none, .ca-pill-nenhuma, .ca-pill-pendente {{
+    background: #EEF2F6;
+    color: {COLORS["text_muted"]};
+}}
+
 /* Subtítulos nativos Streamlit */
 [data-testid="stSubheader"] {{
     color: {COLORS["navy"]} !important;
@@ -518,37 +636,7 @@ def render_app_sidebar() -> None:
         st.markdown("### Contract Analyzer")
         st.caption("Análise inteligente de contratos")
 
-        contracts = cached_contracts_for_session()
-        if contracts:
-            from app.utils.ui import _filter_contracts, _contract_label
-
-            sb_search = st.text_input(
-                "Buscar",
-                key="sidebar_contract_search",
-                placeholder="Contrato ou cliente…",
-                label_visibility="collapsed",
-            )
-            filtered = _filter_contracts(contracts, search_q=sb_search)
-            if not filtered and sb_search.strip():
-                filtered = list(contracts)
-            options = {_contract_label(c): c.id for c in filtered}
-            labels = list(options.keys())
-            idx = 0
-            if st.session_state.active_contract_id:
-                for i, lbl in enumerate(labels):
-                    if options[lbl] == st.session_state.active_contract_id:
-                        idx = i
-                        break
-            sel = st.selectbox("Contrato ativo", labels, index=idx, key="sidebar_contract")
-            on_sidebar_contract_changed(options[sel])
-            active = next((c for c in filtered if c.id == options[sel]), None)
-            if active:
-                n_ver = len(db.get_versions(active.id))
-                st.caption(f"{n_ver} versão(ões)")
-                if db.contract_has_proposal(active):
-                    st.caption(f"Proposta: {active.proposal_label}")
-        else:
-            st.caption("Nenhum contrato cadastrado")
+        render_sidebar_contract_controls()
 
         if st.button("Novo contrato", width="stretch", type="primary"):
             from app.utils.active_contract import clear_active_contract_context
