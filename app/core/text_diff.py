@@ -18,6 +18,9 @@ _BULLET_CHARS = r"[•●▪◦‣⁃∙·\*]"
 _MATCH_WS_RE = re.compile(r"\s+")
 _MATCH_BULLET_RE = re.compile(rf"{_BULLET_CHARS}\s*")
 _MATCH_PAGEBREAK_RE = re.compile(r"[\f\u000c]+")
+_HYPHEN_BREAK_RE = re.compile(r"(\w)-\s+(\w)")
+_WORD_RE = re.compile(r"\w+", flags=re.UNICODE)
+_NON_CONTENT_TYPES = frozenset({"unchanged", "moved"})
 
 _DIFF_CSS = """
 <style>
@@ -74,6 +77,93 @@ def _texts_essentially_same(a: str, b: str) -> bool:
         return True
     ka, kb = _match_key(a), _match_key(b)
     return bool(ka) and ka == kb
+
+
+def _join_pdf_hyphenation(text: str) -> str:
+    """Junta quebras de hífen típicas de extração PDF (con- trato → contrato)."""
+    t = text
+    prev = None
+    while prev != t:
+        prev = t
+        t = _HYPHEN_BREAK_RE.sub(r"\1\2", t)
+    return t
+
+
+def content_tokens(text: str) -> tuple[str, ...]:
+    """Tokens de palavra após normalizar ruído cosmético (caixa, hífen, bullet, NBSP)."""
+    if not text:
+        return ()
+    t = unicodedata.normalize("NFKC", text)
+    t = t.replace("\u00a0", " ").replace("\u2011", "-")
+    t = _MATCH_PAGEBREAK_RE.sub(" ", t)
+    t = _join_pdf_hyphenation(t)
+    t = _MATCH_BULLET_RE.sub(" ", t)
+    t = _MATCH_WS_RE.sub(" ", t).strip().casefold()
+    return tuple(_WORD_RE.findall(t))
+
+
+def is_cosmetic_hunk(hunk: TextDiffHunk) -> bool:
+    """True se a diferença é só formatação/pontuação/caixa/hifenização — sem token de conteúdo."""
+    if hunk.change_type in _NON_CONTENT_TYPES:
+        return True
+    if hunk.change_type == "modified":
+        return content_tokens(hunk.text_a or "") == content_tokens(hunk.text_b or "")
+    tokens = content_tokens(hunk.text_b or hunk.text_a or "")
+    return not tokens
+
+
+def is_content_hunk(hunk: TextDiffHunk) -> bool:
+    """Hunk com alteração de palavra/token — candidato a análise por IA."""
+    if hunk.change_type in _NON_CONTENT_TYPES:
+        return False
+    return not is_cosmetic_hunk(hunk)
+
+
+def content_hunks_for_ai(hunks: list[TextDiffHunk]) -> list[TextDiffHunk]:
+    """Hunks de conteúdo (não unchanged, moved nem cosméticos) para Validação/Criteriosa."""
+    return [h for h in hunks if is_content_hunk(h)]
+
+
+def format_text_delta(text_a: str | None, text_b: str | None, *, max_chars: int = 80) -> str:
+    """Resumo curto do que mudou (ex.: '12 meses → 24 meses')."""
+    a = text_a or ""
+    b = text_b or ""
+    if not a and b:
+        snippet = " ".join(content_tokens(b)[:8]) or b.strip()
+        return snippet[:max_chars]
+    if a and not b:
+        snippet = " ".join(content_tokens(a)[:8]) or a.strip()
+        return snippet[:max_chars]
+    wa = _WORD_RE.findall(a)
+    wb = _WORD_RE.findall(b)
+    if not wa and not wb:
+        return ""
+    matcher = difflib.SequenceMatcher(None, [w.casefold() for w in wa], [w.casefold() for w in wb])
+    removed: list[str] = []
+    added: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in ("replace", "delete"):
+            removed.extend(wa[i1:i2])
+        if tag in ("replace", "insert"):
+            added.extend(wb[j1:j2])
+    left = " ".join(removed).strip()
+    right = " ".join(added).strip()
+    if left and right:
+        delta = f"{left} → {right}"
+    else:
+        delta = right or left
+    if len(delta) > max_chars:
+        return delta[: max_chars - 1] + "…"
+    return delta
+
+
+def format_hunk_delta(hunk: TextDiffHunk, *, max_chars: int = 80) -> str:
+    """Delta curto de um hunk para título de card/IA."""
+    if hunk.change_type == "moved":
+        return "trecho movido"
+    return format_text_delta(hunk.text_a, hunk.text_b, max_chars=max_chars)
 
 
 def _escape_para(text: str) -> str:

@@ -12,11 +12,15 @@ from app.core.text_diff import (
     changed_hunks,
     compile_changed_blocks_digest,
     compute_text_diff,
+    content_hunks_for_ai,
+    format_hunk_delta,
     get_html_diff,
+    is_content_hunk,
+    is_cosmetic_hunk,
     paragraph_diff_hunks,
     render_side_by_side_html,
 )
-from app.models.schemas import AnalysisMode
+from app.models.schemas import AnalysisMode, TextDiffHunk
 from app.core.contract_comparator import compare_contracts
 
 TEXT_A = """
@@ -236,3 +240,70 @@ class TestTextDiffRealContracts:
         assert material == []
         assert result.similarity_score == 1.0
         assert not isinstance(result, tuple)
+
+
+class TestCosmeticFilter:
+    def test_whitespace_and_punct_are_cosmetic(self) -> None:
+        hunk = TextDiffHunk(
+            hunk_id="w1",
+            change_type="modified",
+            text_a="O contrato de prestação.",
+            text_b="O  contrato de prestação",
+        )
+        assert is_cosmetic_hunk(hunk)
+        assert not is_content_hunk(hunk)
+
+    def test_case_only_is_cosmetic(self) -> None:
+        hunk = TextDiffHunk(
+            hunk_id="c1",
+            change_type="modified",
+            text_a="Cláusula de confidencialidade.",
+            text_b="CLÁUSULA de confidencialidade.",
+        )
+        assert is_cosmetic_hunk(hunk)
+
+    def test_pdf_hyphenation_is_cosmetic(self) -> None:
+        hunk = TextDiffHunk(
+            hunk_id="h1",
+            change_type="modified",
+            text_a="con- trato de consultoria",
+            text_b="contrato de consultoria",
+        )
+        assert is_cosmetic_hunk(hunk)
+
+    def test_moved_is_not_content_for_ai(self) -> None:
+        hunk = TextDiffHunk(
+            hunk_id="m1",
+            change_type="moved",
+            text_a="Cláusula especial permanece inalterada.",
+        )
+        assert is_cosmetic_hunk(hunk)
+        assert not is_content_hunk(hunk)
+
+    def test_12_vs_24_months_is_content(self) -> None:
+        hunk = TextDiffHunk(
+            hunk_id="p1",
+            change_type="modified",
+            text_a="O prazo de vigência é de 12 meses.",
+            text_b="O prazo de vigência é de 24 meses.",
+        )
+        assert is_content_hunk(hunk)
+        delta = format_hunk_delta(hunk)
+        assert "12" in delta and "24" in delta
+
+    def test_content_hunks_for_ai_drops_noise(self) -> None:
+        base = (
+            "CLÁUSULA DE CONFIDENCIALIDADE.\n\n"
+            "O prazo de vigência é de 12 meses.\n\n"
+            "Encerramento."
+        )
+        revised = (
+            "Cláusula de confidencialidade.\n\n"
+            "O prazo de vigência é de 24 meses.\n\n"
+            "Encerramento."
+        )
+        result = compute_text_diff(base, revised)
+        content = content_hunks_for_ai(result.hunks)
+        assert len(content) == 1
+        assert "12" in (content[0].text_a or "")
+        assert "24" in (content[0].text_b or "")

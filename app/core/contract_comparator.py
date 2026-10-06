@@ -14,7 +14,12 @@ from rapidfuzz import fuzz
 
 from app.core.context_limits import CHUNK_OVERLAP_CHARS, CHUNK_SIZE_CHARS, MAX_EXCERPT_CHARS
 from app.core.llm import get_llm, get_llm_pro
-from app.core.text_diff import compute_text_diff
+from app.core.text_diff import (
+    compute_text_diff,
+    content_hunks_for_ai,
+    format_hunk_delta,
+    is_content_hunk,
+)
 from app.models.schemas import (
     AnalysisMode,
     ChangeCategory,
@@ -58,12 +63,15 @@ def _hunk_category(change_type: str) -> ChangeCategory:
 
 
 def _hunk_title(hunk: TextDiffHunk) -> str:
+    delta = format_hunk_delta(hunk)
     if hunk.change_type == "added":
-        return "Parágrafo adicionado"
+        return f"Parágrafo adicionado: {delta}" if delta else "Parágrafo adicionado"
     if hunk.change_type == "removed":
-        return "Parágrafo removido"
+        return f"Parágrafo removido: {delta}" if delta else "Parágrafo removido"
     if hunk.change_type == "moved":
         return "Parágrafo movido"
+    if delta:
+        return delta
     return "Parágrafo alterado"
 
 
@@ -107,7 +115,7 @@ def validate_hunks_as_changes(
     invalid = 0
 
     for h in hunks:
-        if h.change_type == "unchanged":
+        if not is_content_hunk(h):
             continue
         valid_a = excerpt_matches(text_a, h.text_a) if h.text_a else True
         valid_b = excerpt_matches(text_b, h.text_b) if h.text_b else True
@@ -144,7 +152,7 @@ def validate_hunks_as_changes(
             )
         )
 
-    summary, recommendation = _validation_alert(hunks)
+    summary, recommendation = _validation_alert([h for h in hunks if is_content_hunk(h)])
     if invalid:
         summary += f" {invalid} trecho(s) com correspondência fuzzy abaixo de {EXCERPT_MATCH_THRESHOLD}."
     if warnings:
@@ -189,7 +197,8 @@ class _SigningValidationLLM(BaseModel):
 SIGNING_VALIDATION_SYSTEM = """Você é advogado de contratos corporativos no Brasil.
 Cenário: as partes já acordaram o texto; uma versão chegou para ASSINATURA.
 Sua missão é só detectar se houve ALTERAÇÃO MATERIAL inserida em relação à versão anterior.
-Ignore formatação, espaços, tipografia, numeração cosméticas e correções ortográficas sem impacto.
+IGNORE: formatação, espaços, pontuação, caixa (maiúsculas/minúsculas), hifenização de PDF,
+numeração cosmética, bullets e correções ortográficas sem impacto jurídico.
 É material: obrigação, valor, prazo, multa, rescisão, foro, confidencialidade, responsabilidade,
 garantia, partes/qualificação, objeto, pagamento, indicação.
 Responda de forma objetiva para decisão de assinar ou não."""
@@ -209,16 +218,18 @@ recommendation: "Pode assinar" ou o que revisar antes de assinar."""
 
 def _digest_hunks_for_signing(hunks: list[TextDiffHunk], *, max_hunks: int = 40) -> str:
     parts: list[str] = []
-    changed = [h for h in hunks if h.change_type != "unchanged"][:max_hunks]
+    changed = content_hunks_for_ai(hunks)[:max_hunks]
     for i, h in enumerate(changed, 1):
         a = (h.text_a or "(vazio)")[:900]
         b = (h.text_b or "(vazio)")[:900]
+        delta = format_hunk_delta(h)
         parts.append(
-            f"[{h.hunk_id}] #{i} tipo={h.change_type}\n"
+            f"[{h.hunk_id}] #{i} tipo={h.change_type}"
+            f"{f' delta={delta}' if delta else ''}\n"
             f"ANTES: {a}\nDEPOIS: {b}"
         )
     if not parts:
-        return "(nenhuma alteração de parágrafo)"
+        return "(nenhuma alteração de conteúdo — só formatação/posição, se houver)"
     return "\n\n---\n\n".join(parts)
 
 
@@ -238,26 +249,26 @@ def validate_signing_version(
     Não analisa comentários. Objetivo: ver se a versão para assinar diverge
     de forma relevante do texto acordado.
     """
-    changed = [h for h in hunks if h.change_type != "unchanged"]
+    changed = content_hunks_for_ai(hunks)
     if not changed:
         return ContractDiffResult(
             contract_id=contract_id,
             version_a_label=label_a,
             version_b_label=label_b,
             executive_summary=(
-                "Nenhuma alteração textual entre a versão acordada e a enviada para assinatura."
+                "Nenhuma alteração de conteúdo entre a versão acordada e a enviada para assinatura."
             ),
-            recommendation="Pode assinar — documentos equivalentes no texto.",
+            recommendation="Pode assinar — diferenças, se houver, são só de formatação ou posição.",
             material_changes_count=0,
             high_risk_count=0,
             has_significant_changes=False,
             contractual_changes=[],
-            summary="Sem diferenças.",
+            summary="Sem diferenças de conteúdo.",
             similarity_score=similarity_score,
         )
 
     if progress_callback:
-        progress_callback(2, 3, f"Validando {len(changed)} alteração(ões) com IA…")
+        progress_callback(2, 3, f"Validando {len(changed)} alteração(ões) de conteúdo com IA…")
 
     hunk_by_id = {h.hunk_id: h for h in changed}
     try:
@@ -277,7 +288,7 @@ def validate_signing_version(
     except Exception as exc:
         logger.warning("Validação com IA falhou — fallback regras: {}", exc)
         return validate_hunks_as_changes(
-            hunks,
+            changed,
             text_a,
             text_b,
             label_a,
@@ -305,7 +316,7 @@ def validate_signing_version(
                 category=_hunk_category(h.change_type),
                 clause_reference="Validação pré-assinatura",
                 title=flag.title or _hunk_title(h),
-                description=(flag.reason or (h.text_b or h.text_a or ""))[:800],
+                description=(flag.reason or format_hunk_delta(h) or (h.text_b or h.text_a or ""))[:800],
                 original_text=h.text_a,
                 new_text=h.text_b,
                 legal_impact=flag.reason or "Alteração material detectada na versão para assinar.",
@@ -438,9 +449,11 @@ def _result_from_hunks(
     changes: list[ContractualChange] | None = None,
     similarity: float = 0.0,
 ) -> ContractDiffResult:
-    contractual = changes or [
-        _hunk_to_change(h, i) for i, h in enumerate(hunks) if h.change_type != "unchanged"
-    ]
+    contractual = (
+        changes
+        if changes is not None
+        else [_hunk_to_change(h, i) for i, h in enumerate(hunks) if is_content_hunk(h)]
+    )
     material = [c for c in contractual if c.requires_attention or c.risk_level != ChangeRisk.LOW]
     high_risk = [c for c in contractual if c.risk_level == ChangeRisk.HIGH]
     return ContractDiffResult(
@@ -449,9 +462,9 @@ def _result_from_hunks(
         version_b_label=label_b,
         executive_summary=executive_summary,
         recommendation=recommendation,
-        material_changes_count=len(material) or len(contractual),
+        material_changes_count=len(material),
         high_risk_count=len(high_risk),
-        has_significant_changes=bool(material or contractual),
+        has_significant_changes=bool(material),
         contractual_changes=contractual,
         summary=executive_summary,
         similarity_score=similarity,
@@ -460,7 +473,12 @@ def _result_from_hunks(
 
 HUNK_LLM_SYSTEM = """Você é advogado especialista em contratos empresariais brasileiros.
 Analise APENAS os trechos alterados fornecidos (hunks confirmados por diff textual).
-NÃO invente alterações que não estejam nos trechos."""
+NÃO invente alterações que não estejam nos trechos.
+IGNORE diferenças só de formatação, espaços, pontuação, caixa (maiúsculas), hifenização de PDF,
+numeração cosmética, bullets e correções ortográficas sem impacto jurídico.
+Devolva um item em changes SOMENTE se houver alteração MATERIAL: obrigação, valor, prazo, multa,
+rescisão, foro, confidencialidade, responsabilidade, garantia, partes, objeto ou pagamento.
+Caso contrário, devolva changes como lista vazia."""
 
 HUNK_LLM_USER = """Hunk {index}/{total}:
 TEXTO ANTERIOR:
@@ -469,7 +487,9 @@ TEXTO ANTERIOR:
 TEXTO NOVO:
 {new}
 
-Classifique risco jurídico e impacto. JSON com changes (lista de 0 ou 1 item)."""
+Se a diferença for cosmética ou sem impacto jurídico, JSON com changes: [].
+Se for material, JSON com changes (lista de 1 item): title curto citando o trecho que mudou
+(ex.: "12 meses → 24 meses"), description, legal_impact, risk_level."""
 
 
 class ContractualChangeLLM(BaseModel):
@@ -510,7 +530,10 @@ class _ChangesPayload(BaseModel):
 
 
 def _llm_change_to_contractual(ch: ContractualChangeLLM) -> ContractualChange | None:
-    if not ch.description and not ch.title:
+    title = (ch.title or "").strip()
+    if not ch.description and not ch.legal_impact and title in {"", "Alteração contratual", "Alteração"}:
+        return None
+    if not ch.description and not title:
         return None
     return ContractualChange(
         change_id=ch.change_id or str(uuid.uuid4())[:8],
@@ -541,7 +564,7 @@ def _payload_from_llm(raw: _ChangesPayloadLLM) -> _ChangesPayload:
 
 
 def _analyze_hunk_llm(h: TextDiffHunk, index: int, total: int) -> list[ContractualChange]:
-    if h.change_type == "unchanged":
+    if not is_content_hunk(h):
         return []
     llm = get_llm_pro(temperature=0, max_output_tokens=_analysis_max_tokens())
     structured = llm.with_structured_output(_ChangesPayloadLLM)
@@ -559,11 +582,26 @@ def _analyze_hunk_llm(h: TextDiffHunk, index: int, total: int) -> list[Contractu
             }
         )
         payload = _payload_from_llm(raw)
-        if payload.changes:
-            return payload.changes
+        if not payload.changes:
+            return []
+        delta = format_hunk_delta(h)
+        generic_titles = {"", "Alteração contratual", "Alteração"}
+        for ch in payload.changes:
+            if not ch.original_text:
+                ch.original_text = h.text_a
+            if not ch.new_text:
+                ch.new_text = h.text_b
+            if delta and (ch.title or "").strip() in generic_titles:
+                ch.title = delta
+        return payload.changes
     except Exception as exc:
         logger.warning("IA falhou no hunk {}: {}", index, exc)
-    return [_hunk_to_change(h, index)]
+        if _hunk_has_legal_keyword(h):
+            change = _hunk_to_change(h, index)
+            change.requires_attention = True
+            change.risk_level = ChangeRisk.MEDIUM
+            return [change]
+        return []
 
 
 def compare_from_hunks(
@@ -577,10 +615,24 @@ def compare_from_hunks(
     progress_callback: ProgressCallback | None = None,
     max_hunks: int = 20,
 ) -> ContractDiffResult:
-    """Análise criteriosa via LLM Pro nos hunks alterados, com validação fuzzy ≥ 85."""
-    changed = [h for h in hunks if h.change_type != "unchanged"][:max_hunks]
+    """Análise criteriosa via LLM Pro nos hunks de conteúdo, com validação fuzzy ≥ 85."""
+    changed = content_hunks_for_ai(hunks)[:max_hunks]
     all_changes: list[ContractualChange] = []
     total = len(changed) or 1
+
+    if not changed:
+        return _result_from_hunks(
+            hunks,
+            contract_id=contract_id,
+            label_a=label_a,
+            label_b=label_b,
+            executive_summary=(
+                f"Análise criteriosa: nenhuma alteração de conteúdo entre {label_a} e {label_b}."
+            ),
+            recommendation="Nada material a revisar nas diferenças textuais.",
+            changes=[],
+            similarity=0.0,
+        )
 
     for i, hunk in enumerate(changed):
         if progress_callback:

@@ -21,6 +21,7 @@ from loguru import logger
 
 from app.core import differ, extractor
 from app.core.diff_index import DiffHunkIndex
+from app.core.text_diff import content_hunks_for_ai, format_text_delta
 from app.db import database as db
 from app.models.schemas import (
     AnalysisMode,
@@ -72,9 +73,27 @@ page_header(
 
 render_active_contract_banner(context="compare")
 
+COMPARE_BUILD = "2026-07-15-modos-v3"
+
 RISK_ICON = {ChangeRisk.HIGH: "🔴", ChangeRisk.MEDIUM: "🟡", ChangeRisk.LOW: "🟢"}
 
-COMPARE_BUILD = "2026-07-15-modos-v3"
+
+def _material_changes(result: ContractDiffResult) -> list:
+    """Alterações que exigem atenção jurídica (modos com IA)."""
+    out = []
+    for ch in result.contractual_changes or []:
+        risk = ch.risk_level.value if hasattr(ch.risk_level, "value") else str(ch.risk_level)
+        if ch.requires_attention or risk != ChangeRisk.LOW.value:
+            out.append(ch)
+    return out
+
+
+def _change_card_title(ch) -> str:
+    delta = format_text_delta(ch.original_text, ch.new_text)
+    title = (ch.title or "Alteração").strip()
+    if delta and delta not in title:
+        return f"{title} — {delta}"
+    return title
 
 _ANALYSIS_LABELS = {
     "Comparar textos (sem IA)": AnalysisMode.TEXT_DIFF,
@@ -234,7 +253,11 @@ def _render_contractual_results(
                 type_b,
                 label_a=label_a,
                 label_b=label_b,
-                changes=result.contractual_changes,
+                changes=(
+                    _material_changes(result)
+                    if analysis_mode in (AnalysisMode.VALIDACAO, AnalysisMode.CRITERIOSA)
+                    else result.contractual_changes
+                ),
                 text_diff_html=diff_html if not show_comment_balloons else None,
                 comment_reviews=(
                     (comment_verification.reviews if comment_verification else [])
@@ -299,17 +322,17 @@ def _render_contractual_results(
         if text_diff and text_diff.inline_diff_html:
             with st.expander("Visão mesclada (inline)", expanded=False):
                 st.markdown(text_diff.inline_diff_html, unsafe_allow_html=True)
-        if text_diff and text_diff.paragraph_hunks:
-            st.markdown("**Blocos de diferença (com localização)**")
-            render_paragraph_diff_locations(
-                text_diff.paragraph_hunks,
-                path_base=path_a,
-                path_new=path_b,
-                path_base_type=type_a,
-                path_new_type=type_b,
-                key_prefix="cmp_diff_blk",
-            )
         if is_plain_diff:
+            if text_diff and text_diff.paragraph_hunks:
+                st.markdown("**Blocos de diferença (com localização)**")
+                render_paragraph_diff_locations(
+                    text_diff.paragraph_hunks,
+                    path_base=path_a,
+                    path_new=path_b,
+                    path_base_type=type_a,
+                    path_new_type=type_b,
+                    key_prefix="cmp_diff_blk",
+                )
             content_n = (
                 (text_diff.paragraphs_added + text_diff.paragraphs_removed + text_diff.paragraphs_modified)
                 if text_diff
@@ -324,24 +347,46 @@ def _render_contractual_results(
                 else:
                     st.success("Nenhuma diferença textual entre as versões.")
         else:
-            if not result.contractual_changes:
+            material = _material_changes(result)
+            if not material:
                 st.success("Nenhuma alteração material identificada entre as versões.")
-            for ch in result.contractual_changes:
+            for ch in material:
                 icon = RISK_ICON.get(ch.risk_level, "•")
                 attn = " ⚠️" if ch.requires_attention else ""
-                with st.expander(f"{icon} {ch.clause_reference} — {ch.title}{attn}"):
+                with st.expander(
+                    f"{icon} {ch.clause_reference} — {_change_card_title(ch)}{attn}",
+                    expanded=False,
+                ):
                     st.write(ch.description)
                     st.caption(
                         f"**Categoria:** {ch.category.value} | **Risco:** {ch.risk_level.value}"
                     )
                     if ch.legal_impact:
                         st.write(f"**Impacto jurídico:** {ch.legal_impact}")
+                    delta = format_text_delta(ch.original_text, ch.new_text)
+                    if delta:
+                        st.markdown(f"**O que mudou:** `{delta}`")
                     if ch.original_text:
                         st.markdown("**Texto anterior:**")
                         st.code(ch.original_text[:2000])
                     if ch.new_text:
                         st.markdown("**Texto na versão revisada:**")
                         st.code(ch.new_text[:2000])
+            if text_diff and text_diff.hunks:
+                extra = content_hunks_for_ai(text_diff.hunks)
+                if extra:
+                    with st.expander(
+                        f"Ver todas as diferenças textuais ({len(extra)})",
+                        expanded=False,
+                    ):
+                        render_paragraph_diff_locations(
+                            extra,
+                            path_base=path_a,
+                            path_new=path_b,
+                            path_base_type=type_a,
+                            path_new_type=type_b,
+                            key_prefix="cmp_diff_blk_ai",
+                        )
 
     if save_version_id and st.button("Salvar análise", key="save_contractual"):
         if analysis_mode == AnalysisMode.TEXT_DIFF and text_diff:
@@ -455,7 +500,6 @@ def _run_comment_pipeline_criteriosa(
             use_embeddings=True,
             attach_locations=True,
         )
-        text_diff.paragraph_hunks = diff_index.hunks
 
     if not n_comments:
         return CommentsReviewResult(
